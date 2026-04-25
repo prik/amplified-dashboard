@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Local env; keep .env.example in git
+.env*.local
+.env

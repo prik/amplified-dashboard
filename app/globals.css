@@ -1,0 +1,666 @@
+@import "tailwindcss";
+
+/* Amplified dashboard — terminal aesthetic. */
+
+:root {
+  --amp-bg: #0a0a0a;
+  --amp-panel: #111111;
+  --amp-panel-2: #161616;
+  --amp-line: #242424;
+  --amp-line-soft: #1b1b1b;
+  --amp-text: #ededed;
+  --amp-muted: #8a8a8a;
+  --amp-dim: #555555;
+  --amp-accent: #b9ff66;
+  --amp-accent-dim: #6b9f33;
+  --amp-red: #ff5c5c;
+  --amp-blue: #6ad0ff;
+  --amp-accent-tint: rgba(185, 255, 102, 0.06);
+  --amp-accent-tint-strong: rgba(185, 255, 102, 0.18);
+  --chart-grid: #1b1b1b;
+  --chart-axis: #555555;
+  --chart-tick: #ededed;
+}
+
+[data-theme="light"] {
+  --amp-bg: #f6f6f1;
+  --amp-panel: #ffffff;
+  --amp-panel-2: #f0f0eb;
+  --amp-line: #dcdcd5;
+  --amp-line-soft: #ebebe5;
+  --amp-text: #1c1c1c;
+  --amp-muted: #5d5d5d;
+  --amp-dim: #9a9a9a;
+  --amp-accent: #3d8c00;
+  --amp-accent-dim: #7ec02a;
+  --amp-red: #c53030;
+  --amp-blue: #1976c2;
+  --amp-accent-tint: rgba(61, 140, 0, 0.10);
+  --amp-accent-tint-strong: rgba(61, 140, 0, 0.22);
+  --chart-grid: #e5e5df;
+  --chart-axis: #a0a0a0;
+  --chart-tick: #1c1c1c;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  background: var(--amp-bg);
+  color: var(--amp-text);
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a { color: inherit; text-decoration: none; }
+
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+.label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--amp-muted);
+}
+
+.panel {
+  background: var(--amp-panel);
+  border: 1px solid var(--amp-line);
+  padding: 16px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--amp-line-soft);
+}
+/* Allow both children to shrink past their content width so nothing gets
+   clipped on narrow screens. */
+.panel-header > * { min-width: 0; }
+
+.kpi-value {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--amp-text);
+  line-height: 1.1;
+  word-break: break-word;
+}
+@media (max-width: 640px) {
+  .kpi-value { font-size: 22px; }
+  .panel { padding: 12px; }
+}
+
+.kpi-sub {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--amp-muted);
+  margin-top: 4px;
+}
+
+.accent { color: var(--amp-accent); }
+.red    { color: var(--amp-red); }
+.muted  { color: var(--amp-muted); }
+.dim    { color: var(--amp-dim); }
+
+.delta-pos { color: var(--amp-accent); }
+.delta-neg { color: var(--amp-red); }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--amp-line);
+  background: var(--amp-panel);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.topbar .brand {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.topbar .brand h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.topbar .brand .tick { color: var(--amp-accent); font-weight: 700; }
+
+.topbar .meta {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  color: var(--amp-muted);
+  font-size: 11px;
+}
+/* On mobile, when .meta wraps to its own row it spans full width so
+   LIVE DATA sits on the left edge and the range switch on the right. */
+@media (max-width: 640px) {
+  .topbar .meta {
+    width: 100%;
+    justify-content: space-between;
+    gap: 10px;
+  }
+}
+
+.topbar .dot-live {
+  display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--amp-accent);
+  box-shadow: 0 0 8px var(--amp-accent);
+  margin-right: 6px;
+  animation: amp-pulse 2s ease-in-out infinite;
+}
+
+@keyframes amp-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--amp-accent); }
+  50%      { opacity: 0.5; box-shadow: 0 0 3px var(--amp-accent); }
+}
+
+/* Prominent LIVE DATA chip in the navbar */
+.live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--amp-accent);
+  background: var(--amp-accent-tint);
+  color: var(--amp-accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  line-height: 1;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  border-radius: 2px;
+  transition: background 0.2s;
+}
+
+.live-chip-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amp-accent);
+}
+.live-chip-dot::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  background: var(--amp-accent);
+  opacity: 0.6;
+  animation: live-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes live-ping {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  75%  { transform: scale(2.4); opacity: 0;   }
+  100% { transform: scale(2.4); opacity: 0;   }
+}
+
+.live-chip-off {
+  border-color: rgba(255, 92, 92, 0.4);
+  background: rgba(255, 92, 92, 0.08);
+  color: var(--amp-red);
+}
+.live-chip-off .live-chip-dot { background: var(--amp-red); }
+.live-chip-off .live-chip-dot::after { background: var(--amp-red); }
+
+/* Mobile — shrink the topbar, break the long wallet address onto its own line */
+@media (max-width: 640px) {
+  .topbar { padding: 10px 12px; }
+  .topbar .brand h1 { font-size: 15px; }
+  .topbar .brand a[href*="solscan"] {
+    width: 100%;
+    font-size: 9px;
+    word-break: break-all;
+  }
+  .range-switch button { padding: 5px 9px; font-size: 10px; }
+}
+
+.range-switch {
+  display: inline-flex;
+  border: 1px solid var(--amp-line);
+}
+.range-switch button {
+  background: transparent;
+  color: var(--amp-muted);
+  border: none;
+  border-right: 1px solid var(--amp-line);
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.range-switch button:last-child { border-right: none; }
+.range-switch button:hover { color: var(--amp-text); background: var(--amp-panel-2); }
+.range-switch button.active { color: var(--amp-bg); background: var(--amp-accent); }
+
+.grid-1px { display: grid; gap: 1px; background: var(--amp-line); }
+.grid-1px > .panel { background: var(--amp-panel); border: none; }
+/* Grid items default to min-width:auto (= content-size). Without this override,
+   children like recharts ResponsiveContainer can push the track wider than 1fr
+   and break layouts on narrow screens. */
+.grid-1px > * { min-width: 0; }
+.panel { overflow: hidden; }
+
+/* Responsive grid classes — mobile-first. All rows collapse to a single
+   column on small screens and widen at ≥640px (sm) and ≥1024px (lg).
+   The KPI row stays 2x2 on mobile because the density-1 version looks sparse. */
+.r-grid-3,
+.r-grid-2,
+.r-grid-2-wide { grid-template-columns: 1fr; }
+.r-grid-4 { grid-template-columns: 1fr 1fr; }
+
+@media (min-width: 640px) {
+  .r-grid-4       { grid-template-columns: 1fr 1fr; }
+  .r-grid-3       { grid-template-columns: 1fr 1fr; }
+  .r-grid-2       { grid-template-columns: 1fr 1fr; }
+  .r-grid-2-wide  { grid-template-columns: 1fr 1fr; }
+}
+@media (min-width: 1024px) {
+  .r-grid-4      { grid-template-columns: repeat(4, 1fr); }
+  .r-grid-3      { grid-template-columns: repeat(3, 1fr); }
+  .r-grid-2      { grid-template-columns: 1fr 1fr; }
+  .r-grid-2-wide { grid-template-columns: 2fr 1fr; }
+}
+
+/* Chart row: calc | chart | feed. Track widths line up with the KPI grid
+   above (4 columns of 1fr each): calc=1fr, chart=2fr (under KPI cols 2-3),
+   feed=1fr (under the 4th KPI). */
+.r-grid-chart-row { grid-template-columns: 1fr; }
+@media (min-width: 640px) {
+  .r-grid-chart-row { grid-template-columns: 1fr 1fr; }
+}
+@media (min-width: 1024px) {
+  .r-grid-chart-row { grid-template-columns: 1fr 2fr 1fr; }
+}
+
+.page-inner {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px;
+}
+@media (max-width: 640px) {
+  .page-inner { padding: 8px; }
+}
+
+.section-title {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--amp-muted);
+}
+
+.lb-row {
+  display: grid;
+  grid-template-columns: 32px 1fr 110px 70px 80px;
+  gap: 10px;
+  padding: 8px 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--amp-line-soft);
+  font-size: 12px;
+}
+@media (max-width: 640px) {
+  /* Drop the "Last seen" column, compact others */
+  .lb-row {
+    grid-template-columns: 24px 1fr 80px 50px;
+    gap: 6px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+  .lb-row > :nth-child(5) { display: none; }
+}
+.lb-row.head {
+  color: var(--amp-muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--amp-line);
+}
+.lb-row .bar {
+  height: 4px;
+  background: var(--amp-accent);
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 8px;
+  opacity: 0.8;
+}
+.lb-row .rank { color: var(--amp-dim); font-variant-numeric: tabular-nums; }
+.lb-row:hover { background: var(--amp-panel-2); }
+
+.wallet { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--amp-text); }
+
+.heatmap {
+  display: grid;
+  grid-template-columns: 22px repeat(24, 1fr);
+  gap: 2px;
+  font-size: 10px;
+}
+.heatmap .hm-label { color: var(--amp-dim); font-size: 10px; display: flex; align-items: center; }
+.heatmap .hm-cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  background: var(--amp-panel-2);
+  min-height: 8px;
+  max-height: 18px;
+}
+/* Instant CSS tooltip — no native [title] delay. Themed via vars so it
+   recolors automatically on light/dark switch. Used by heatmap cells AND
+   distribution bars. */
+[data-tooltip] { position: relative; }
+.heatmap .hm-cell[data-tooltip]:hover::after,
+.dist-bar .b[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--amp-panel);
+  border: 1px solid var(--amp-line);
+  color: var(--amp-text);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* Top status strip — centered, evenly distributed. Sits between the topbar
+   and the KPI row. */
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding: 12px 20px;
+  margin-bottom: 1px;
+  background: var(--amp-panel);
+  border: 1px solid var(--amp-line);
+  font-size: 12px;
+}
+.status-strip > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+.status-strip strong { font-weight: 500; font-size: 15px; }
+@media (max-width: 640px) {
+  .status-strip { gap: 4px 12px; padding: 10px 12px; font-size: 11px; }
+  .status-strip strong { font-size: 13px; }
+}
+
+/* Trade-frequency horizontal bars. */
+.freq-bars { display: grid; gap: 6px; }
+.freq-row {
+  display: grid;
+  grid-template-columns: 50px 1fr 50px 36px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.freq-label { letter-spacing: 0.05em; }
+.freq-track {
+  height: 8px;
+  background: var(--amp-line-soft);
+  position: relative;
+}
+.freq-fill { display: block; height: 100%; transition: width 0.3s; }
+
+/* Live-feed panel makes its body fill the panel so the feed list is as tall
+   as the chart panel next to it (CSS grid stretches both to equal height). */
+.feed-panel { display: flex; flex-direction: column; }
+.feed-panel .compact-feed { flex: 1; min-height: 280px; }
+
+/* Compact 2-col feed used beside the revenue chart. Tape-style. */
+.compact-feed {
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.compact-feed-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 5px 0;
+  gap: 8px;
+  border-bottom: 1px solid var(--amp-line-soft);
+  font-size: 11px;
+}
+.compact-feed-row:first-child { animation: amp-flash 0.6s ease-out; }
+@keyframes amp-flash {
+  0%   { background: rgba(185, 255, 102, 0.18); }
+  100% { background: transparent; }
+}
+
+.feed { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; }
+.feed-row {
+  display: grid;
+  grid-template-columns: 60px 34px 110px 1fr 70px;
+  gap: 8px;
+  padding: 8px 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--amp-line-soft);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.feed-row.head-row { border-bottom: 1px solid var(--amp-line); }
+
+@media (max-width: 640px) {
+  .feed-row {
+    grid-template-columns: 44px 30px 90px 1fr 50px;
+    gap: 6px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+}
+.feed .tag-in  { color: var(--amp-accent); }
+.feed .tag-out { color: var(--amp-blue); }
+
+/* Sun ←|→ moon switch. The thumb slides between the two icons. Both icons are
+   always visible; the active side is highlighted via the thumb under it.
+   Sized to match the live-chip / range-pill row height. */
+.theme-switch {
+  --thumb-size: 22px;
+  --pad: 3px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 56px;
+  height: 28px;
+  padding: var(--pad);
+  background: var(--amp-panel-2);
+  border: 1px solid var(--amp-accent);
+  cursor: pointer;
+  border-radius: 999px;
+  box-sizing: border-box;
+}
+.theme-switch:hover { background: var(--amp-accent-tint); }
+.theme-switch-icon {
+  width: var(--thumb-size);
+  height: var(--thumb-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--amp-muted);
+  z-index: 2;
+  transition: color 0.18s;
+}
+.theme-switch-icon svg { width: 12px; height: 12px; }
+.theme-switch-thumb {
+  position: absolute;
+  top: var(--pad);
+  left: var(--pad);
+  width: var(--thumb-size);
+  height: var(--thumb-size);
+  background: var(--amp-accent);
+  border-radius: 50%;
+  transition: transform 0.22s cubic-bezier(.4, .14, .3, 1);
+  z-index: 1;
+  box-shadow: 0 0 8px var(--amp-accent-tint-strong);
+}
+/* Sun on left, moon on right. Thumb sits under the *active* mode's icon —
+   so dark mode = thumb on the right (moon), light mode = thumb on the left
+   (sun). */
+.theme-switch.is-dark .theme-switch-thumb {
+  transform: translateX(calc(56px - var(--thumb-size) - (var(--pad) * 2)));
+}
+/* Highlight the active-side icon: invert it on top of the thumb. */
+.theme-switch.is-light .theme-switch-icon:first-child { color: var(--amp-bg); }
+.theme-switch.is-dark  .theme-switch-icon:last-child  { color: var(--amp-bg); }
+
+/* Quick preset buttons inside the revenue chart panel.
+   padding-left matches the YAxis width (set to 36 in the chart) so the first
+   button aligns with the chart's plot-area left edge. */
+.chart-presets {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-left: 36px;
+}
+@media (max-width: 640px) {
+  .chart-presets { padding-left: 28px; }
+}
+.chart-presets button {
+  background: transparent;
+  border: 1px solid var(--amp-line);
+  color: var(--amp-muted);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  transition: background 0.15s, color 0.15s;
+}
+.chart-presets button:hover {
+  color: var(--amp-text);
+  background: var(--amp-panel-2);
+}
+.chart-presets button:active {
+  color: var(--amp-bg);
+  background: var(--amp-accent);
+  border-color: var(--amp-accent);
+}
+
+/* Revenue calculator. Now sits in a ~35% column in the chart row, so we keep
+   the inputs stacked at narrow widths and only widen them at large viewports. */
+.calc-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.calc-input { display: flex; flex-direction: column; gap: 6px; }
+.calc-input-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid var(--amp-line);
+  background: var(--amp-bg);
+  padding: 6px 10px;
+}
+.calc-input-row input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--amp-text);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 16px;
+  width: 100%;
+  padding: 0;
+}
+.calc-input-row input:focus { outline: none; }
+.calc-input-row input::-webkit-outer-spin-button,
+.calc-input-row input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.calc-input-row input[type=number] { -moz-appearance: textfield; }
+
+.calc-slider-row { display: flex; align-items: center; gap: 12px; }
+.calc-slider-row input[type=range] {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--amp-line);
+  border-radius: 0;
+  outline: none;
+  cursor: pointer;
+}
+.calc-slider-row input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px;
+  background: var(--amp-accent);
+  border: 2px solid var(--amp-bg);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(185, 255, 102, 0.5);
+}
+.calc-slider-row input[type=range]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  background: var(--amp-accent);
+  border: 2px solid var(--amp-bg);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(185, 255, 102, 0.5);
+}
+
+.calc-out { display: grid; gap: 8px; }
+.calc-out > div {
+  border-top: 1px solid var(--amp-line-soft);
+  padding-top: 8px;
+}
+
+/* Fee distribution + Trade frequency panels stack as flex columns so their
+   trailing subtitle ("X fees indexed" / "X traders since launch") sits on
+   the panel's bottom edge — keeping their bottoms visually aligned. */
+.bottom-stretch { display: flex; flex-direction: column; }
+.bottom-stretch .stretch-fill { flex: 1; min-height: 0; }
+.bottom-stretch .stretch-bottom { margin-top: auto; padding-top: 8px; }
+
+.dist-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 80px;
+}
+.dist-bar .b {
+  flex: 1;
+  background: var(--amp-accent-dim);
+  min-height: 2px;
+}
+.dist-bar .b:hover { background: var(--amp-accent); }
+
+.link-ext {
+  color: var(--amp-muted);
+  border-bottom: 1px dotted var(--amp-line);
+}
+.link-ext:hover { color: var(--amp-accent); border-bottom-color: var(--amp-accent); }

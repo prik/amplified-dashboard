@@ -1,0 +1,26 @@
+services:
+  amp-dash:
+    build: .
+    container_name: amp-dash
+    restart: always
+    ports:
+      - "3100:3100"
+    env_file:
+      - .env.local
+    # AMP_DB_PATH is the only var we want to force regardless of .env.local
+    # (local dev points at ./data, container must use /app/data). Everything
+    # else comes from env_file — don't use shell interpolation here since it
+    # would override the file's values with undefined-from-shell.
+    environment:
+      - AMP_DB_PATH=/app/data/amp.db
+    volumes:
+      - amp-dash-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3100/api/amp/summary?range=7d"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  amp-dash-data:
