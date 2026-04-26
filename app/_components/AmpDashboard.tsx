@@ -48,7 +48,7 @@ export function AmpDashboard() {
   const { data: summary } = usePolled<Summary>(`/api/amp/summary?range=${range}`, 30_000)
   const heatRange = range === '24h' ? '7d' : range
   const { data: heatmap } = usePolled<Heatmap>(`/api/amp/heatmap?range=${heatRange}`, 120_000)
-  const { data: feed } = usePolled<Feed>('/api/amp/feed?limit=10', 15_000)
+  const { data: feed } = usePolled<Feed>('/api/amp/feed?limit=50', 15_000)
   const { data: distribution } = usePolled<Distribution>('/api/amp/distribution', 120_000)
   const { data: retention } = usePolled<Retention>('/api/amp/retention', 300_000)
   const { data: lifetime } = usePolled<Lifetime>('/api/amp/lifetime', 120_000)
@@ -122,7 +122,6 @@ export function AmpDashboard() {
             </strong>
           </span>
           <span>
-            <span className="label">indexed</span>
             <strong className="mono accent">{nf0.format(summary?.indexed ?? 0)}</strong>
             <span className="label">txs</span>
           </span>
@@ -316,15 +315,11 @@ export function AmpDashboard() {
 
         <div className="panel" style={{ marginTop: 1, textAlign: 'center', background: 'transparent', border: 'none' }}>
           <span className="label dim">
-            data from Solana RPC · price from CoinGecko
-            {summary?.feeWallet && (
-              <>
-                {' · '}
-                <a className="link-ext" href={`https://solscan.io/account/${summary.feeWallet}`} target="_blank" rel="noreferrer">
-                  view fee wallet on solscan
-                </a>
-              </>
-            )}
+            made by <a className="link-ext" href="https://t.me/priktop" target="_blank" rel="noreferrer">Nick</a>
+            {' · '}
+            <a className="link-ext" href="https://t.me/AmplifiedTradingBot?start=ref_5c3250ca-99ea-4e8d-a135-56bb2f030991" target="_blank" rel="noreferrer">
+              try Amplified
+            </a>
           </span>
         </div>
       </div>
@@ -656,7 +651,7 @@ function HeatmapGrid({ cells, colors }: { cells: { dow: number; hour: number; n:
 // rolling tape always represents new user trades — pool refunds and operator
 // withdrawals are noise here. Sized to match the revenue chart's height.
 function CompactLiveFeed({ rows }: { rows: FeedRow[] }) {
-  const fees = rows.filter((r) => r.category === 'fee')
+  const fees = rows.filter((r) => r.category === 'fee').slice(0, 12)
   if (fees.length === 0) {
     return <div style={{ padding: 20, textAlign: 'center' }} className="muted">indexing…</div>
   }
@@ -846,6 +841,10 @@ function RevenueCalculator({
         </label>
       </div>
 
+      <div className="kpi-sub" style={{ marginTop: 8, marginBottom: 8 }}>
+        avg weekly revenue {fmtSol(avgWeekly)} SOL · 50% → users
+      </div>
+
       <div className="calc-out">
         <div>
           <div className="label">at current pace · weekly</div>
@@ -865,10 +864,6 @@ function RevenueCalculator({
             {fmtSol(userAnnualAtGrowth)} SOL<span className="muted">{fmtUsdInline(userAnnualAtGrowth)}</span>
           </div>
         </div>
-      </div>
-
-      <div className="kpi-sub" style={{ marginTop: 8 }}>
-        avg weekly revenue {fmtSol(avgWeekly)} SOL · 50% → users · supply {fmtTokens(totalSupply)}
       </div>
     </div>
   )
