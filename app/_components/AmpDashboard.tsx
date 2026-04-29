@@ -927,11 +927,6 @@ function RevenueCalculator({
             />
             <span className="calc-input-pct">= {sharePct.toFixed(3)}%</span>
           </span>
-          {verifiedPool && (
-            <span className="calc-hint">
-              <span className="accent">{verifiedSharePct.toFixed(3)}%</span> of ~{fmtTokensCompact(verifiedPool.totalBalance)} verified pool
-            </span>
-          )}
         </label>
 
         <label className="calc-input">
