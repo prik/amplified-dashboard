@@ -5,6 +5,15 @@ const config: NextConfig = {
   // better-sqlite3 is a native module — keep it external to the bundled output
   // so Next copies the compiled .node file alongside the standalone build.
   serverExternalPackages: ['better-sqlite3'],
+  async redirects() {
+    return [
+      {
+        source: '/TG-Bot',
+        destination: 'https://t.me/AmplifiedTradingBot?start=ref_priktop',
+        permanent: false,
+      },
+    ]
+  },
 }
 
 export default config

@@ -1,0 +1,47 @@
+{
+	# We're providing our own cert (Cloudflare Origin CA), so don't try ACME.
+	auto_https disable_redirects
+	admin off
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		-Server
+	}
+}
+
+ampsrev.xyz, www.ampsrev.xyz {
+	tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key
+
+	encode zstd gzip
+	import security_headers
+
+	# SSE endpoint: disable buffering so events flush immediately to clients.
+	@sse path /api/amp/events
+	reverse_proxy @sse amp-dash:3100 {
+		flush_interval -1
+		transport http {
+			read_buffer 4096
+		}
+		# Cloudflare's CF-Connecting-IP is the only trustworthy client IP since
+		# the host firewall (final hardening step) will only accept CF traffic.
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+	}
+
+	reverse_proxy amp-dash:3100 {
+		header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+		header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+	}
+}
+
+# Plain HTTP from CF (shouldn't happen in Full mode, but answer politely).
+http://ampsrev.xyz, http://www.ampsrev.xyz {
+	redir https://{host}{uri} permanent
+}

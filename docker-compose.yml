@@ -3,8 +3,9 @@ services:
     build: .
     container_name: amp-dash
     restart: always
+    # Bind to loopback only — public traffic must enter via Caddy on 80/443.
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     env_file:
       - .env.local
     # AMP_DB_PATH is the only var we want to force regardless of .env.local
@@ -22,5 +23,23 @@ services:
       retries: 3
       start_period: 20s
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/etc/caddy/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - amp-dash
+
 volumes:
   amp-dash-data:
+  caddy-data:
+  caddy-config:
