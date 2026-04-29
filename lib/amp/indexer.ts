@@ -9,7 +9,7 @@ import {
   upsertVerifiedBalance, getVerifiedBalances, type TxRow, type VerifRow,
 } from './db'
 import {
-  FEE_WALLET, TOKEN_MINT, VERIFICATION_WALLET, VERIFICATION_MIN_LAMPORTS,
+  FEE_WALLET, TOKEN_MINT, VERIFICATION_WALLET, VERIFICATION_LAMPORTS,
   LAUNCH_TS_SEC,
 } from './config'
 import { lastFridayUtcSec } from './queries'
@@ -219,10 +219,11 @@ interface ClassifiedPing {
   amount_lamports: number
 }
 
-// A "ping" is a SOL inflow to VERIFICATION_WALLET of at least
-// VERIFICATION_MIN_LAMPORTS, signed by exactly one external wallet (which
-// becomes the verified holder). Outflows from the verification wallet and
-// inflows below the threshold are ignored.
+// A "ping" is a SOL inflow to VERIFICATION_WALLET equal to exactly
+// VERIFICATION_LAMPORTS (default 0.001 SOL), signed by exactly one external
+// wallet (which becomes the verified holder). Operational top-ups and other
+// transfers at different sizes are ignored — the project's verification
+// protocol uses an exact amount as its sentinel.
 function classifyVerifPing(tx: ParsedTx | null): ClassifiedPing | null {
   if (!VERIFICATION_WALLET) return null
   if (!tx || !tx.meta || tx.meta.err) return null
@@ -236,7 +237,7 @@ function classifyVerifPing(tx: ParsedTx | null): ClassifiedPing | null {
   const pre = tx.meta.preBalances, post = tx.meta.postBalances
   if (!pre || !post || pre.length !== post.length || idx >= pre.length) return null
   const delta = post[idx] - pre[idx]
-  if (delta < VERIFICATION_MIN_LAMPORTS) return null
+  if (delta !== VERIFICATION_LAMPORTS) return null
 
   // Payer = the signer that isn't the verification wallet itself.
   const payerIdx = keys.findIndex((k) => keyIsSigner(k) && keyPubkey(k) !== VERIFICATION_WALLET)
