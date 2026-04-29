@@ -176,10 +176,16 @@ export function AmpDashboard() {
                 : 'Current period'
             }
             big={`${fmtSol(currentPeriodSol(summary))} SOL`}
-            bigSub={summary ? fmtUsd(currentPeriodSol(summary), summary.price) : undefined}
             sub={
               summary
-                ? `${summary.lastPeriod && summary.lastPeriod.revenueSol > 0 ? `last period: ${fmtSol(summary.lastPeriod.netRevenueSol)} SOL` : ''}`
+                ? [
+                    fmtUsd(currentPeriodSol(summary), summary.price),
+                    summary.lastPeriod && summary.lastPeriod.revenueSol > 0
+                      ? `last period: ${fmtSol(summary.lastPeriod.netRevenueSol)} SOL`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
                 : '—'
             }
             delta={null}
