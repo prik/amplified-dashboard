@@ -886,9 +886,12 @@ function RevenueCalculator({
   // only. Smaller verified denominator → bigger slice for each verified holder.
   // We assume the user IS verified for the "if you're verified" scenario; if
   // verified data hasn't loaded yet (cold start, etc.) fall back to tokens /
-  // totalSupply so the calculator still produces a number.
-  const hasVerified = verified != null && verified.totalBalance > 0
-  const verifiedDenominator = hasVerified ? verified!.totalBalance : totalSupply
+  // totalSupply so the calculator still produces a number. `verifiedPool` is
+  // typed as Verified|null so a truthy check narrows it everywhere downstream
+  // — no non-null assertions needed.
+  const verifiedPool: Verified | null =
+    verified != null && verified.totalBalance > 0 ? verified : null
+  const verifiedDenominator = verifiedPool ? verifiedPool.totalBalance : totalSupply
   const verifiedSharePct = verifiedDenominator > 0 ? (tokens / verifiedDenominator) * 100 : 0
   const userWeeklyNow = avgWeekly * 0.5 * (verifiedSharePct / 100)
   const userWeeklyAtGrowth = userWeeklyNow * growth
@@ -918,9 +921,9 @@ function RevenueCalculator({
             />
             <span className="calc-input-pct">= {sharePct.toFixed(3)}%</span>
           </span>
-          {hasVerified && (
+          {verifiedPool && (
             <span className="calc-hint">
-              <span className="accent">{verifiedSharePct.toFixed(3)}%</span> of ~{fmtTokensCompact(verified!.totalBalance)} verified pool
+              <span className="accent">{verifiedSharePct.toFixed(3)}%</span> of ~{fmtTokensCompact(verifiedPool.totalBalance)} verified pool
             </span>
           )}
         </label>
@@ -942,7 +945,7 @@ function RevenueCalculator({
       </div>
 
       <div className="kpi-sub" style={{ marginTop: 8, marginBottom: 8 }}>
-        avg weekly {fmtSol(avgWeekly)} SOL · 50% → {hasVerified ? 'verified holders' : 'users'}
+        avg weekly {fmtSol(avgWeekly)} SOL · 50% → {verifiedPool ? 'verified holders' : 'users'}
       </div>
 
       <div className="calc-out">
