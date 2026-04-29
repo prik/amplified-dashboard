@@ -1,12 +1,5 @@
 import { RPC_URL } from './config'
 
-// Helius Enhanced Transactions API — returns up to 100 pre-parsed txs per
-// single HTTP call. Massively more efficient than getSignaturesForAddress +
-// N× getTransaction for backfill. Auto-detected when the RPC URL is Helius.
-const HELIUS_MATCH = /helius-rpc\.com\/\?api-key=([^&]+)/
-const HELIUS_KEY = HELIUS_MATCH.exec(RPC_URL)?.[1] ?? null
-export const HAS_HELIUS = HELIUS_KEY != null
-
 let rpcIdCounter = 1
 
 interface RpcResponse<T> {
@@ -108,10 +101,8 @@ const txParams = (sig: string) => [
   { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
 ]
 
-// We used to send batched JSON-RPC, but Helius free tier rate-limits the batch
-// endpoint aggressively (5 calls in one request = 5 counted calls, and the
-// batch endpoint itself seems to 429 before individual calls do). Single-call
-// mode with paced spacing is strictly slower but reliable.
+// Batch JSON-RPC was tested earlier but provider rate-limits made single-call
+// with paced spacing strictly more reliable. Slower but doesn't get throttled.
 const PER_SIG_SPACING_MS = 300
 
 export async function getTransactionsBatch(signatures: string[]): Promise<TxBatchResult[]> {
@@ -147,41 +138,3 @@ export async function getTokenSupply(mint: string): Promise<number> {
   return amount / Math.pow(10, decimals)
 }
 
-// ---- Helius Enhanced Transactions ----
-
-export interface EnhancedTx {
-  signature: string
-  slot: number
-  timestamp: number
-  feePayer: string
-  nativeTransfers?: Array<{
-    fromUserAccount: string | null
-    toUserAccount: string | null
-    amount: number // lamports
-  }>
-  transactionError: unknown
-}
-
-// GET /v0/addresses/{addr}/transactions?api-key=KEY&before=SIG&limit=100
-// Returns newest-first, same pagination semantics as getSignaturesForAddress.
-export async function getEnhancedTransactions(
-  address: string,
-  opts: { before?: string; limit?: number } = {}
-): Promise<EnhancedTx[]> {
-  if (!HELIUS_KEY) throw new Error('getEnhancedTransactions requires a Helius RPC URL')
-  const { before, limit = 100 } = opts
-  const qs = new URLSearchParams({ 'api-key': HELIUS_KEY, limit: String(limit) })
-  if (before) qs.set('before', before)
-  const url = `https://api.helius.xyz/v0/addresses/${address}/transactions?${qs}`
-
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const res = await fetch(url)
-    if (res.status === 429) {
-      await sleep(1000 * Math.pow(2, attempt))
-      continue
-    }
-    if (!res.ok) throw new Error(`helius enhanced http ${res.status}`)
-    return (await res.json()) as EnhancedTx[]
-  }
-  throw new Error('helius enhanced: exhausted retries on 429')
-}

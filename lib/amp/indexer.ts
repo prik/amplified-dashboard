@@ -1,13 +1,12 @@
 import {
-  getSignaturesForAddress, getTransactionsBatch, getEnhancedTransactions,
-  getTokenSupply, sleep, type ParsedTx, type EnhancedTx, HAS_HELIUS,
+  getSignaturesForAddress, getTransactionsBatch,
+  getTokenSupply, sleep, type ParsedTx,
 } from './rpc'
 import { insertTxs, getState, setState, hasSignature, countTxs, type TxRow } from './db'
 import { FEE_WALLET, TOKEN_MINT } from './config'
 import { ampEvents } from './events'
 
 const SIG_PAGE = 1000
-const ENHANCED_PAGE = 100
 const TAIL_INTERVAL_MS = 60_000
 const BETWEEN_PAGE_MS = 300
 
@@ -17,12 +16,12 @@ interface Classified {
   amount_lamports: number
 }
 
-// Classify a generic parsed Solana tx by comparing pre/post balances at the
-// fee-wallet index. For INFLOWS the counterparty is the tx's fee payer (first
-// signer), NOT the account with the largest opposite delta — on Amplified buys
-// the pool co-signs the tx and moves SOL for trade settlement, so a naive
-// largest-delta heuristic misattributes the fee source. The user's deposit
-// wallet is always the fee payer.
+// Classify a parsed Solana tx by comparing pre/post balances at the fee-wallet
+// index. For INFLOWS the counterparty is the tx's fee payer (first signer),
+// NOT the account with the largest opposite delta — on Amplified buys the pool
+// co-signs the tx and moves SOL for trade settlement, so a naive largest-delta
+// heuristic misattributes the fee source. The user's deposit wallet is always
+// the fee payer.
 function classifyParsedTx(tx: ParsedTx | null): Classified | null {
   if (!tx || !tx.meta || tx.meta.err) return null
   const keys = tx.transaction?.message?.accountKeys
@@ -59,69 +58,7 @@ function classifyParsedTx(tx: ParsedTx | null): Classified | null {
   return { direction: 'out', counterparty, amount_lamports: Math.abs(ourDelta) }
 }
 
-// Classify Helius-enhanced tx. Net fee-wallet delta decides direction; for
-// inflows the counterparty is the tx's feePayer (the user's deposit wallet),
-// not whichever account happened to have the largest opposite transfer.
-function classifyEnhanced(tx: EnhancedTx): Classified | null {
-  if (tx.transactionError) return null
-  const transfers = tx.nativeTransfers ?? []
-
-  let inAmt = 0
-  let outAmt = 0
-  let biggestOutRecipient: string | null = null
-  let biggestOutAmt = 0
-
-  for (const t of transfers) {
-    if (!t.amount || t.amount <= 0) continue
-    if (t.toUserAccount === FEE_WALLET && t.fromUserAccount && t.fromUserAccount !== FEE_WALLET) {
-      inAmt += t.amount
-    } else if (t.fromUserAccount === FEE_WALLET && t.toUserAccount && t.toUserAccount !== FEE_WALLET) {
-      outAmt += t.amount
-      if (t.amount > biggestOutAmt) {
-        biggestOutAmt = t.amount
-        biggestOutRecipient = t.toUserAccount
-      }
-    }
-  }
-
-  const netIn = inAmt - outAmt
-  if (netIn > 0) {
-    if (!tx.feePayer || tx.feePayer === FEE_WALLET) return null
-    return { direction: 'in', counterparty: tx.feePayer, amount_lamports: netIn }
-  }
-  if (netIn < 0) {
-    if (!biggestOutRecipient) return null
-    return { direction: 'out', counterparty: biggestOutRecipient, amount_lamports: -netIn }
-  }
-  return null
-}
-
 interface PageResult { processed: number; stored: number }
-
-// ---- Helius-enhanced processor (fast path) ----
-
-async function processEnhancedPage(txs: EnhancedTx[]): Promise<PageResult> {
-  const fresh = txs.filter((t) => !hasSignature(t.signature))
-  if (fresh.length === 0) return { processed: 0, stored: 0 }
-
-  const rows: TxRow[] = []
-  for (const t of fresh) {
-    const c = classifyEnhanced(t)
-    if (!c) continue
-    rows.push({
-      signature: t.signature,
-      slot: t.slot,
-      block_time: t.timestamp ?? 0,
-      direction: c.direction,
-      counterparty: c.counterparty,
-      amount_lamports: c.amount_lamports,
-    })
-  }
-  if (rows.length > 0) insertTxs(rows)
-  return { processed: fresh.length, stored: rows.length }
-}
-
-// ---- Fallback processor (generic RPC) ----
 
 async function processSignaturesViaRpc(
   sigMetas: { signature: string; slot: number; blockTime: number | null }[]
@@ -160,35 +97,19 @@ async function backfill(): Promise<void> {
 
   for (;;) {
     try {
-      if (HAS_HELIUS) {
-        const txs = await getEnhancedTransactions(FEE_WALLET, { before, limit: ENHANCED_PAGE })
-        if (!txs || txs.length === 0) break
-        pages++
-        const { processed, stored } = await processEnhancedPage(txs)
-        const oldest = txs[txs.length - 1]
-        setState('oldest_sig', oldest.signature)
-        before = oldest.signature
-        const oldestDate = oldest.timestamp ? new Date(oldest.timestamp * 1000).toISOString().slice(0, 10) : '—'
-        console.log(
-          `[amp] backfill page ${pages} (enhanced): ${txs.length} txs, ${stored}/${processed} stored. ` +
-            `total=${countTxs()}. oldest=${oldest.signature.slice(0, 10)}… (${oldestDate})`
-        )
-        if (txs.length < ENHANCED_PAGE) break
-      } else {
-        const sigs = await getSignaturesForAddress(FEE_WALLET, { before, limit: SIG_PAGE })
-        if (!sigs || sigs.length === 0) break
-        pages++
-        const { processed, stored } = await processSignaturesViaRpc(sigs)
-        const oldest = sigs[sigs.length - 1]
-        setState('oldest_sig', oldest.signature)
-        before = oldest.signature
-        const oldestDate = oldest.blockTime ? new Date(oldest.blockTime * 1000).toISOString().slice(0, 10) : '—'
-        console.log(
-          `[amp] backfill page ${pages}: ${sigs.length} sigs, ${stored}/${processed} stored. ` +
-            `total=${countTxs()}. oldest=${oldest.signature.slice(0, 10)}… (${oldestDate})`
-        )
-        if (sigs.length < SIG_PAGE) break
-      }
+      const sigs = await getSignaturesForAddress(FEE_WALLET, { before, limit: SIG_PAGE })
+      if (!sigs || sigs.length === 0) break
+      pages++
+      const { processed, stored } = await processSignaturesViaRpc(sigs)
+      const oldest = sigs[sigs.length - 1]
+      setState('oldest_sig', oldest.signature)
+      before = oldest.signature
+      const oldestDate = oldest.blockTime ? new Date(oldest.blockTime * 1000).toISOString().slice(0, 10) : '—'
+      console.log(
+        `[amp] backfill page ${pages}: ${sigs.length} sigs, ${stored}/${processed} stored. ` +
+          `total=${countTxs()}. oldest=${oldest.signature.slice(0, 10)}… (${oldestDate})`
+      )
+      if (sigs.length < SIG_PAGE) break
       await sleep(BETWEEN_PAGE_MS)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -205,16 +126,9 @@ async function backfill(): Promise<void> {
 
 async function tailOnce(): Promise<void> {
   try {
-    let stored = 0
-    if (HAS_HELIUS) {
-      const txs = await getEnhancedTransactions(FEE_WALLET, { limit: ENHANCED_PAGE })
-      if (!txs || txs.length === 0) return
-      stored = (await processEnhancedPage(txs)).stored
-    } else {
-      const sigs = await getSignaturesForAddress(FEE_WALLET, { limit: 100 })
-      if (!sigs || sigs.length === 0) return
-      stored = (await processSignaturesViaRpc(sigs)).stored
-    }
+    const sigs = await getSignaturesForAddress(FEE_WALLET, { limit: 100 })
+    if (!sigs || sigs.length === 0) return
+    const { stored } = await processSignaturesViaRpc(sigs)
     if (stored > 0) {
       const total = countTxs()
       console.log(`[amp] tail: +${stored} new txs. total=${total}`)
@@ -235,8 +149,7 @@ export function startIndexer(): void {
 
   const run = async () => {
     console.log(
-      `[amp] indexer starting. fee_wallet=${FEE_WALLET} existing_txs=${countTxs()} ` +
-        `mode=${HAS_HELIUS ? 'helius-enhanced' : 'generic-rpc'}`
+      `[amp] indexer starting. fee_wallet=${FEE_WALLET} existing_txs=${countTxs()}`
     )
     fetchSupplyOnce().catch((e) => console.error('[amp] supply fetch crashed:', e))
     backfill().catch((e) => console.error('[amp] backfill crashed:', e))

@@ -10,13 +10,13 @@ export const dynamic = 'force-dynamic'
 
 export async function GET(req: NextRequest) {
   const range = req.nextUrl.searchParams.get('range') ?? '7d'
-  const price = await getSolPriceUsd()
-  let treasurySol: number | null = null
-  try {
-    // Cache treasury balance for 10s across all concurrent visitors so we
-    // don't fire one getBalance per page load.
-    const lam = await ttlCache('treasury_lamports', 10_000, () => getBalance(FEE_WALLET))
-    treasurySol = lamToSol(lam)
-  } catch {}
+  // Run the two upstream calls in parallel — both are cached, but on cache
+  // miss this halves the cold-path latency (one CoinGecko + one Solana RPC
+  // round-trip rather than back-to-back).
+  const [price, lam] = await Promise.all([
+    getSolPriceUsd(),
+    ttlCache('treasury_lamports', 10_000, () => getBalance(FEE_WALLET)).catch(() => null),
+  ])
+  const treasurySol = lam == null ? null : lamToSol(lam)
   return Response.json(buildSummary(range, price, treasurySol))
 }

@@ -1,5 +1,14 @@
 import { db, getState } from './db'
-import { OPERATOR_WALLETS, POOL_WALLET, FEE_WALLET, LAUNCH_TS_SEC, TOTAL_SUPPLY_FALLBACK } from './config'
+import {
+  OPERATOR_WALLETS, POOL_WALLET, FEE_WALLET, LAUNCH_TS_SEC,
+  TOTAL_SUPPLY_FALLBACK, DUST_THRESHOLD_LAMPORTS,
+} from './config'
+
+// SQL fragment that drops dust spam (1-lamport blasts, 10000-lamport vanity-
+// address poisoning, etc.) from inflow aggregations. Inlined as a literal
+// because the threshold is a process-wide constant, not user input — saves a
+// bound parameter per query and lets SQLite plan the index scan cleanly.
+const DUST_SQL = ` AND amount_lamports >= ${DUST_THRESHOLD_LAMPORTS}`
 
 export const LAMPORTS_PER_SOL = 1_000_000_000
 export const lamToSol = (lam: number | bigint): number => Number(lam) / LAMPORTS_PER_SOL
@@ -99,6 +108,17 @@ export interface Summary {
     poolOutflowsSol: number
     feeEvents: number
   }
+  // Prior Friday-to-Friday window — apples-to-apples with sinceFriday so the UI
+  // can show "current period vs last period" revenue without mixing pre/post
+  // distribution numbers (lastPayout.sol is post-50%-split-and-verified).
+  lastPeriod: {
+    from: number
+    to: number
+    revenueSol: number
+    poolOutflowsSol: number
+    netRevenueSol: number
+    feeEvents: number
+  }
 }
 
 export function buildSummary(range: string, price: number | null, treasurySol: number | null): Summary {
@@ -112,7 +132,7 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
   // All-time (launch-constrained)
   const inAll = db.prepare(
     `SELECT COALESCE(SUM(amount_lamports),0) AS s, COUNT(*) AS n FROM amp_txs
-     WHERE direction='in' AND block_time >= ?`
+     WHERE direction='in' AND block_time >= ?${DUST_SQL}`
   ).get(LAUNCH_TS_SEC) as { s: number; n: number }
 
   const payoutsAll = db.prepare(
@@ -137,7 +157,7 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
   // Window
   const inWin = db.prepare(
     `SELECT COALESCE(SUM(amount_lamports),0) AS s, COUNT(*) AS n FROM amp_txs
-     WHERE direction='in' AND block_time BETWEEN ? AND ?`
+     WHERE direction='in' AND block_time BETWEEN ? AND ?${DUST_SQL}`
   ).get(from, to) as { s: number; n: number }
 
   const payoutsWin = db.prepare(
@@ -159,11 +179,11 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
     ).get(from, to, POOL_WALLET) as { s: number }
   )
 
-  // Unique traders (excludes pool since pool isn't a trader)
+  // Unique traders (excludes pool since pool isn't a trader, and dust spam)
   const uniqueIn = (
     db.prepare(
       `SELECT COUNT(DISTINCT counterparty) AS n FROM amp_txs
-       WHERE direction='in' AND block_time >= ?${notPool.sql}`
+       WHERE direction='in' AND block_time >= ?${notPool.sql}${DUST_SQL}`
     ).get(LAUNCH_TS_SEC, ...notPool.params) as { n: number }
   ).n
 
@@ -177,7 +197,7 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
   const uniqueInWin = (
     db.prepare(
       `SELECT COUNT(DISTINCT counterparty) AS n FROM amp_txs
-       WHERE direction='in' AND block_time BETWEEN ? AND ?${notPool.sql}`
+       WHERE direction='in' AND block_time BETWEEN ? AND ?${notPool.sql}${DUST_SQL}`
     ).get(from, to, ...notPool.params) as { n: number }
   ).n
 
@@ -188,18 +208,24 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
   const inPrev = (
     db.prepare(
       `SELECT COALESCE(SUM(amount_lamports),0) AS s FROM amp_txs
-       WHERE direction='in' AND block_time BETWEEN ? AND ?`
+       WHERE direction='in' AND block_time BETWEEN ? AND ?${DUST_SQL}`
     ).get(prevFrom, prevTo) as { s: number }
   ).s
   const uniqInPrev = (
     db.prepare(
       `SELECT COUNT(DISTINCT counterparty) AS n FROM amp_txs
-       WHERE direction='in' AND block_time BETWEEN ? AND ?${notPool.sql}`
+       WHERE direction='in' AND block_time BETWEEN ? AND ?${notPool.sql}${DUST_SQL}`
     ).get(prevFrom, prevTo, ...notPool.params) as { n: number }
   ).n
 
+  // Headline "indexed events" count is what lands on the dashboard, so it
+  // mirrors the same dust filter applied to the user-facing aggregations —
+  // outflows are unaffected (operator/pool wallets never send dust).
   const indexedPostLaunch = (
-    db.prepare(`SELECT COUNT(*) AS c FROM amp_txs WHERE block_time >= ?`).get(LAUNCH_TS_SEC) as { c: number }
+    db.prepare(
+      `SELECT COUNT(*) AS c FROM amp_txs
+       WHERE block_time >= ? AND (direction='out' OR amount_lamports >= ?)`
+    ).get(LAUNCH_TS_SEC, DUST_THRESHOLD_LAMPORTS) as { c: number }
   ).c
 
   // Most-recent user-payout batch. Payouts happen weekly; group by block_time
@@ -216,8 +242,24 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
   const nowSec = Math.floor(Date.now() / 1000)
   const inSinceFri = db.prepare(
     `SELECT COALESCE(SUM(amount_lamports),0) AS s, COUNT(*) AS n FROM amp_txs
-     WHERE direction='in' AND block_time BETWEEN ? AND ?`
+     WHERE direction='in' AND block_time BETWEEN ? AND ?${DUST_SQL}`
   ).get(fridayFrom, nowSec) as { s: number; n: number }
+
+  // Prior Friday-to-Friday window — for apples-to-apples comparison with the
+  // current accrual period (revenue generated, not amount distributed). We
+  // also subtract pool outflows during the window since those are over-liq
+  // refunds the fee wallet had to send out, so net = what was distributable.
+  const prevFridayFrom = Math.max(LAUNCH_TS_SEC, fridayFrom - 7 * 86400)
+  const inLastPeriod = db.prepare(
+    `SELECT COALESCE(SUM(amount_lamports),0) AS s, COUNT(*) AS n FROM amp_txs
+     WHERE direction='in' AND block_time BETWEEN ? AND ?${DUST_SQL}`
+  ).get(prevFridayFrom, fridayFrom) as { s: number; n: number }
+  const poolOutLastPeriod = !POOL_WALLET ? { s: 0 } : (
+    db.prepare(
+      `SELECT COALESCE(SUM(amount_lamports),0) AS s FROM amp_txs
+       WHERE direction='out' AND block_time BETWEEN ? AND ?${isPool}`
+    ).get(prevFridayFrom, fridayFrom, POOL_WALLET) as { s: number }
+  )
   const payoutsSinceFri = db.prepare(
     `SELECT COALESCE(SUM(amount_lamports),0) AS s FROM amp_txs
      WHERE direction='out' AND block_time BETWEEN ? AND ?${notPayout.sql}`
@@ -293,6 +335,14 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
       poolOutflowsSol: lamToSol(poolSinceFri.s),
       feeEvents: inSinceFri.n,
     },
+    lastPeriod: {
+      from: prevFridayFrom,
+      to: fridayFrom,
+      revenueSol: lamToSol(inLastPeriod.s),
+      poolOutflowsSol: lamToSol(poolOutLastPeriod.s),
+      netRevenueSol: lamToSol(inLastPeriod.s - poolOutLastPeriod.s),
+      feeEvents: inLastPeriod.n,
+    },
   }
 }
 
@@ -313,12 +363,16 @@ export function buildTimeseries(range: string) {
   // because bound `?` parameters were being treated as REAL by SQLite, turning
   // `block_time / ?` into floating-point division — which preserved sub-day
   // resolution instead of bucketing to day boundaries.
+  // Inflow CASEs gate on the dust threshold so the revenue chart's per-bucket
+  // counts/amounts agree with the headline figures and the user-counting
+  // queries (no spam-sized blips on quiet days).
+  const inFilter = `direction='in' AND amount_lamports >= ${DUST_THRESHOLD_LAMPORTS}`
   const sql = `
     SELECT
       (block_time / ${bucket}) * ${bucket} AS bucket,
-      SUM(CASE WHEN direction='in' THEN amount_lamports ELSE 0 END) AS in_lam,
+      SUM(CASE WHEN ${inFilter} THEN amount_lamports ELSE 0 END) AS in_lam,
       SUM(CASE WHEN ${outFilter} THEN amount_lamports ELSE 0 END) AS out_lam,
-      SUM(CASE WHEN direction='in' THEN 1 ELSE 0 END) AS in_n,
+      SUM(CASE WHEN ${inFilter} THEN 1 ELSE 0 END) AS in_n,
       SUM(CASE WHEN ${outFilter} THEN 1 ELSE 0 END) AS out_n
     FROM amp_txs
     WHERE block_time BETWEEN ? AND ?
@@ -352,7 +406,7 @@ export function buildLeaderboard(limit: number) {
     `SELECT counterparty AS wallet, SUM(amount_lamports) AS total_lam, COUNT(*) AS trades,
             MIN(block_time) AS first_seen, MAX(block_time) AS last_seen
      FROM amp_txs
-     WHERE direction='in' AND block_time >= ?${notPool.sql}
+     WHERE direction='in' AND block_time >= ?${notPool.sql}${DUST_SQL}
      GROUP BY counterparty ORDER BY total_lam DESC LIMIT ?`
   ).all(LAUNCH_TS_SEC, ...notPool.params, n) as Array<{
     wallet: string; total_lam: number; trades: number; first_seen: number; last_seen: number
@@ -377,7 +431,7 @@ export function buildHeatmap(range: string) {
     `SELECT CAST(strftime('%w', block_time, 'unixepoch') AS INTEGER) AS dow,
             CAST(strftime('%H', block_time, 'unixepoch') AS INTEGER) AS hour,
             COUNT(*) AS n
-     FROM amp_txs WHERE direction='in' AND block_time BETWEEN ? AND ?
+     FROM amp_txs WHERE direction='in' AND block_time BETWEEN ? AND ?${DUST_SQL}
      GROUP BY dow, hour`
   ).all(from, to) as Array<{ dow: number; hour: number; n: number }>
   return { cells: rows }
@@ -395,7 +449,7 @@ export function buildNewUsers(range: string) {
        SELECT counterparty, MIN(block_time) AS first_seen,
               DATE(MIN(block_time), 'unixepoch') AS day
        FROM amp_txs
-       WHERE direction='in' AND block_time >= ? ${notPoolFilter}
+       WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
        GROUP BY counterparty
      )
      WHERE first_seen BETWEEN ? AND ?
@@ -411,7 +465,7 @@ export function buildDistribution() {
   const notPoolFilter = notPool.length > 0 ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})` : ''
   const rows = db.prepare(
     `SELECT amount_lamports AS lam FROM amp_txs
-     WHERE direction='in' AND block_time >= ? ${notPoolFilter} ORDER BY lam`
+     WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL} ORDER BY lam`
   ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ lam: number }>
   const sols = rows.map((r) => lamToSol(r.lam))
   const n = sols.length
@@ -438,7 +492,7 @@ export function buildWhaleShare() {
   const notPoolFilter = notPool.length > 0 ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})` : ''
   const rows = db.prepare(
     `SELECT counterparty, SUM(amount_lamports) AS s FROM amp_txs
-     WHERE direction='in' AND block_time >= ? ${notPoolFilter}
+     WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
      GROUP BY counterparty ORDER BY s DESC`
   ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ counterparty: string; s: number }>
   const total = rows.reduce((a, r) => a + Number(r.s), 0)
@@ -471,13 +525,14 @@ export function buildRetention() {
     const row = db.prepare(
       `WITH first AS (
          SELECT counterparty AS w, MIN(block_time) AS t0
-         FROM amp_txs WHERE direction='in' AND block_time >= ? ${notPoolFilter}
+         FROM amp_txs WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
          GROUP BY counterparty
        )
        SELECT COUNT(*) AS cohort,
               SUM(CASE WHEN EXISTS (
                 SELECT 1 FROM amp_txs x WHERE x.direction='in' AND x.counterparty=first.w
                   AND x.block_time > first.t0 + 3600 AND x.block_time <= first.t0 + ? * 86400
+                  AND x.amount_lamports >= ${DUST_THRESHOLD_LAMPORTS}
               ) THEN 1 ELSE 0 END) AS ret
        FROM first WHERE first.t0 <= ?`
     ).get(LAUNCH_TS_SEC, ...notPool, windowDays, cutoff) as { cohort: number; ret: number }
@@ -506,7 +561,7 @@ export function buildTradeFrequency() {
 
   const rows = db.prepare(
     `SELECT counterparty, COUNT(*) AS n FROM amp_txs
-     WHERE direction='in' AND block_time >= ? ${notPoolFilter}
+     WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
      GROUP BY counterparty`
   ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ counterparty: string; n: number }>
 
@@ -552,26 +607,30 @@ export function buildLifetime() {
             SUM(amount_lamports) AS lam,
             COUNT(*) AS n
      FROM amp_txs
-     WHERE direction='in' AND block_time >= ?
+     WHERE direction='in' AND block_time >= ?${DUST_SQL}
      GROUP BY day ORDER BY day`
   ).all(LAUNCH_TS_SEC) as Array<{ day: string; lam: number; n: number }>
 
-  // Daily new users (wallets whose first post-launch deposit is on that day).
+  // Daily new users — first post-launch *real* deposit (above dust). A wallet
+  // that only ever sent dust is never counted; a wallet that received dust
+  // before its first real fee is counted on the day of its first real fee.
   const newU = db.prepare(
     `SELECT day, COUNT(*) AS n FROM (
        SELECT counterparty, DATE(MIN(block_time), 'unixepoch') AS day
        FROM amp_txs
-       WHERE direction='in' AND block_time >= ? ${notPoolFilter}
+       WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
        GROUP BY counterparty
      ) GROUP BY day ORDER BY day`
   ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ day: string; n: number }>
 
-  // Daily active users (distinct depositing wallets that day, pool excluded).
+  // Daily active users — distinct depositing wallets that day, pool excluded,
+  // dust excluded. Pure-spam wallets (1-lamport blasts, vanity-address poison
+  // txs) never qualify, so the chart reflects real-user activity only.
   const dau = db.prepare(
     `SELECT DATE(block_time, 'unixepoch') AS day,
             COUNT(DISTINCT counterparty) AS n
      FROM amp_txs
-     WHERE direction='in' AND block_time >= ? ${notPoolFilter}
+     WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
      GROUP BY day ORDER BY day`
   ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ day: string; n: number }>
 
@@ -612,9 +671,9 @@ export function buildFeed(limit: number) {
   const rows = db.prepare(
     `SELECT signature, slot, block_time, direction, counterparty, amount_lamports
      FROM amp_txs
-     WHERE block_time >= ?
+     WHERE block_time >= ? AND (direction='out' OR amount_lamports >= ?)
      ORDER BY block_time DESC LIMIT ?`
-  ).all(LAUNCH_TS_SEC, n) as Array<{
+  ).all(LAUNCH_TS_SEC, DUST_THRESHOLD_LAMPORTS, n) as Array<{
     signature: string; slot: number; block_time: number;
     direction: 'in' | 'out'; counterparty: string; amount_lamports: number
   }>

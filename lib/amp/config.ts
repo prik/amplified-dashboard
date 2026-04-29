@@ -26,6 +26,16 @@ const rawSupply = (process.env.AMP_TOTAL_SUPPLY ?? '').trim()
 export const TOTAL_SUPPLY_FALLBACK: number =
   rawSupply ? Number(rawSupply) || 1_000_000_000 : 1_000_000_000
 
+// Inflow events below this many lamports are treated as dust spam and excluded
+// from every user-facing aggregation. Two known spam patterns target the fee
+// wallet: 1-lamport multi-recipient blasts, and 10000-lamport vanity-address
+// poisoning (lookalike pool addresses). Real Amplified fees never fall below
+// ~10000 lamports — even partial refunds hit the network's 5000-lamport tx-fee
+// floor — so 10001 cleanly separates spam from signal.
+const rawDust = (process.env.AMP_DUST_THRESHOLD_LAMPORTS ?? '').trim()
+export const DUST_THRESHOLD_LAMPORTS: number =
+  rawDust ? Math.max(0, Number(rawDust)) || 10001 : 10001
+
 export type OutflowCategory = 'user_payout' | 'operator' | 'pool'
 
 export function classifyOutflow(recipient: string): OutflowCategory {

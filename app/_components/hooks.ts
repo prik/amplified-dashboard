@@ -193,6 +193,14 @@ export interface Summary {
     poolOutflowsSol: number
     feeEvents: number
   }
+  lastPeriod: {
+    from: number
+    to: number
+    revenueSol: number
+    poolOutflowsSol: number
+    netRevenueSol: number
+    feeEvents: number
+  }
 }
 
 export interface TimePoint { t: number; revenueSol: number; payoutsSol: number; feeEvents: number; payoutEvents: number }
