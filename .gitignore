@@ -9,3 +9,15 @@ data/
 # Local env; keep .env.example in git
 .env*.local
 .env
+
+# Build artifact — churns every build
+tsconfig.tsbuildinfo
+
+# Optional sqlite seed snapshot for migrate.sh; large binary, not source
+amp-db.tgz
+
+# Cloudflare Origin TLS material — origin.key is a private key
+caddy/certs/
+
+# Local Claude Code project notes
+CLAUDE.md
