@@ -36,6 +36,20 @@ const rawDust = (process.env.AMP_DUST_THRESHOLD_LAMPORTS ?? '').trim()
 export const DUST_THRESHOLD_LAMPORTS: number =
   rawDust ? Math.max(0, Number(rawDust)) || 10001 : 10001
 
+// Holders opt into the weekly rev-share by sending ~0.001 SOL to this wallet.
+// The verified-balance indexer tracks inflows of at least
+// VERIFICATION_MIN_LAMPORTS (a small tolerance below 0.001 SOL — Solscan filters
+// surfaced both 0.0009999 and 0.001 amounts, so the floor is 0.0009999) and
+// then reconstructs each pinged wallet's AMP balance at the period-start
+// snapshot. Disabled when unset (the dashboard falls back to "share of supply"
+// math in the calculator).
+export const VERIFICATION_WALLET: string | null =
+  (process.env.AMP_VERIFICATION_WALLET ?? '').trim() || null
+
+const rawVerifMin = (process.env.AMP_VERIFICATION_LAMPORTS_MIN ?? '').trim()
+export const VERIFICATION_MIN_LAMPORTS: number =
+  rawVerifMin ? Math.max(1, Number(rawVerifMin) || 999_900) : 999_900
+
 export type OutflowCategory = 'user_payout' | 'operator' | 'pool'
 
 export function classifyOutflow(recipient: string): OutflowCategory {

@@ -74,6 +74,13 @@ export async function getSignaturesForAddress(
   return rpcCall<SigMeta[]>('getSignaturesForAddress', [address, params])
 }
 
+export interface ParsedTokenBalance {
+  accountIndex: number
+  mint: string
+  owner?: string
+  uiTokenAmount: { amount: string; decimals: number; uiAmount: number | null }
+}
+
 export interface ParsedTx {
   slot: number
   blockTime: number | null
@@ -82,6 +89,8 @@ export interface ParsedTx {
     preBalances: number[]
     postBalances: number[]
     fee: number
+    preTokenBalances?: ParsedTokenBalance[]
+    postTokenBalances?: ParsedTokenBalance[]
   } | null
   transaction: {
     message: {
@@ -122,6 +131,32 @@ export async function getTransactionsBatch(signatures: string[]): Promise<TxBatc
 export async function getBalance(address: string): Promise<number> {
   const res = await rpcCall<{ value: number }>('getBalance', [address, { commitment: 'confirmed' }])
   return res?.value ?? 0
+}
+
+export interface TokenAccountInfo {
+  pubkey: string
+  amount: string
+  decimals: number
+  uiAmount: number | null
+}
+
+// All token accounts a wallet owns for a given mint. Usually one (the ATA),
+// but pre-ATA wallets and rare manual setups can have multiple. We sum across
+// every returned account when computing balances. The {mint} filter matches
+// regardless of which token program the account lives under.
+export async function getTokenAccountsByOwner(owner: string, mint: string): Promise<TokenAccountInfo[]> {
+  const res = await rpcCall<{ value: Array<{ pubkey: string; account: { data: { parsed: { info: { tokenAmount: { amount: string; decimals: number; uiAmount: number | null } } } } } }> }>(
+    'getTokenAccountsByOwner',
+    [owner, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]
+  ).catch(() => null)
+  if (!res?.value) return []
+  const out: TokenAccountInfo[] = []
+  for (const v of res.value) {
+    const t = v.account?.data?.parsed?.info?.tokenAmount
+    if (!t) continue
+    out.push({ pubkey: v.pubkey, amount: t.amount, decimals: t.decimals, uiAmount: t.uiAmount })
+  }
+  return out
 }
 
 // Fetch the total supply of an SPL token. Returns the supply as a plain number

@@ -811,6 +811,25 @@ a { color: inherit; text-decoration: none; }
   padding-top: 8px;
 }
 
+/* Compact "= X.XXX%" sitting at the right edge of the tokens input — matches
+   the original muted hint look. Short enough that it can't push the input off
+   the row; the longer verified-pool % lives below in .calc-hint, right-aligned
+   so both share-percentages stack visually on the same axis. */
+.calc-input-pct {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--amp-muted);
+  white-space: nowrap;
+  padding-left: 6px;
+}
+
+.calc-hint {
+  font-size: 11px;
+  color: var(--amp-muted);
+  line-height: 1.35;
+  text-align: right;
+}
+
 /* Fee distribution + Trade frequency panels stack as flex columns so their
    trailing subtitle ("X fees indexed" / "X traders since launch") sits on
    the panel's bottom edge — keeping their bottoms visually aligned. */

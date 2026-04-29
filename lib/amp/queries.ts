@@ -1,4 +1,4 @@
-import { db, getState } from './db'
+import { db, getState, getVerifiedBalances } from './db'
 import {
   OPERATOR_WALLETS, POOL_WALLET, FEE_WALLET, LAUNCH_TS_SEC,
   TOTAL_SUPPLY_FALLBACK, DUST_THRESHOLD_LAMPORTS,
@@ -699,5 +699,64 @@ export function buildFeed(limit: number) {
         category,
       }
     }),
+  }
+}
+
+// ---- Verified balances ----
+// Aggregated view of the verified-holders table for the current period.
+// snapshot amounts are stored as raw integer strings (BigInt-safe); the UI
+// only needs whole-token totals so we render them via uiAmount semantics here.
+
+export interface VerifiedSummary {
+  periodStart: number
+  // Total snapshot AMP balance across non-forfeited verified wallets.
+  totalBalance: number
+  // Wallets that pinged AND still have a non-zero snapshot balance.
+  walletCount: number
+  // walletCount > 0 ? totalBalance / walletCount : 0
+  avgBalance: number
+  // Wallets that pinged but forfeited (sold/transferred during the period).
+  forfeitedCount: number
+  // Wallets that pinged but hold no AMP (snapshot = 0, not forfeited).
+  emptyCount: number
+  // Most recent snapshot recompute time (unix sec). Lets the UI surface
+  // freshness; null when nothing is computed yet.
+  lastChecked: number | null
+}
+
+function rawToUi(raw: string, decimals: number): number {
+  if (decimals === 0) return Number(raw)
+  // Avoid Number(BigInt) precision loss: split integer/fractional parts and
+  // recombine via string arithmetic, then parse once.
+  const padded = raw.padStart(decimals + 1, '0')
+  const intPart = padded.slice(0, padded.length - decimals)
+  const fracPart = padded.slice(padded.length - decimals)
+  return parseFloat(`${intPart}.${fracPart}`)
+}
+
+export function buildVerified(): VerifiedSummary {
+  const periodStart = lastFridayUtcSec()
+  const rows = getVerifiedBalances(periodStart)
+  let totalBalance = 0
+  let walletCount = 0
+  let forfeitedCount = 0
+  let emptyCount = 0
+  let lastChecked: number | null = null
+  for (const r of rows) {
+    if (r.last_checked > (lastChecked ?? 0)) lastChecked = r.last_checked
+    if (r.forfeited === 1) { forfeitedCount++; continue }
+    const ui = rawToUi(r.snapshot_raw, r.decimals)
+    if (ui <= 0) { emptyCount++; continue }
+    totalBalance += ui
+    walletCount++
+  }
+  return {
+    periodStart,
+    totalBalance,
+    walletCount,
+    avgBalance: walletCount > 0 ? totalBalance / walletCount : 0,
+    forfeitedCount,
+    emptyCount,
+    lastChecked,
   }
 }

@@ -256,3 +256,13 @@ export interface LifetimePoint {
   cumFees: number
 }
 export interface Lifetime { days: LifetimePoint[]; launchTs: number; now: number }
+
+export interface Verified {
+  periodStart: number
+  totalBalance: number
+  walletCount: number
+  avgBalance: number
+  forfeitedCount: number
+  emptyCount: number
+  lastChecked: number | null
+}

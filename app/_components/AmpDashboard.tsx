@@ -7,7 +7,7 @@ import {
 import {
   usePolled, useAmpLiveEvents, useTheme,
   Range, Summary, Heatmap, Feed, Distribution, Retention, TradeFrequency,
-  Lifetime, Timeseries, FeedRow, LifetimePoint, ThemeColors,
+  Lifetime, Timeseries, FeedRow, LifetimePoint, ThemeColors, Verified,
 } from './hooks'
 
 const RANGES: { value: Range; label: string }[] = [
@@ -64,6 +64,7 @@ export function AmpDashboard() {
   const { data: retention } = usePolled<Retention>('/api/amp/retention', 300_000)
   const { data: lifetime } = usePolled<Lifetime>('/api/amp/lifetime', 120_000)
   const { data: tradeFreq } = usePolled<TradeFrequency>('/api/amp/trade-frequency', 120_000)
+  const { data: verified } = usePolled<Verified>('/api/amp/verified', 60_000)
   // Hourly resolution for the 1D preset on the revenue chart.
   const { data: hourly } = usePolled<Timeseries>('/api/amp/timeseries?range=24h', 60_000)
   const { connected: liveConnected } = useAmpLiveEvents()
@@ -220,6 +221,7 @@ export function AmpDashboard() {
             launchTs={summary?.launchTs ?? null}
             price={summary?.price ?? null}
             totalSupply={summary?.totalSupply ?? 1_000_000_000}
+            verified={verified ?? null}
           />
         </div>
 
@@ -404,6 +406,15 @@ function CopyAddress({ addr }: { addr: string }) {
       {addr}
     </button>
   )
+}
+
+// Compact-tokens formatter used by the calculator hint. Lives at module scope
+// so renderers don't recreate it per call.
+function fmtTokensCompact(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`
+  return nf0.format(n)
 }
 
 function Kpi({ label, big, bigSub, sub, delta, deltaSuffix, accent }: {
@@ -832,11 +843,16 @@ function TradeFrequencyCard({ data, colors }: { data: TradeFrequency | null; col
 }
 
 // "What if" calculator: enter your token holdings + a growth multiplier,
-// see what your weekly / annual payouts look like at that scenario. Share of
-// supply is derived from tokens / totalSupply. Persists in localStorage.
+// see what your weekly / annual payouts look like at that scenario. When the
+// indexer has a verified-balance snapshot for the current period, the share is
+// derived from tokens / verified-supply (the real denominator the project pays
+// against); otherwise it falls back to tokens / totalSupply.
 function RevenueCalculator({
-  days, launchTs, price, totalSupply,
-}: { days: LifetimePoint[]; launchTs: number | null; price: number | null; totalSupply: number }) {
+  days, launchTs, price, totalSupply, verified,
+}: {
+  days: LifetimePoint[]; launchTs: number | null; price: number | null;
+  totalSupply: number; verified: Verified | null;
+}) {
   // Default token amount: 1% of supply (a reasonable starter scenario).
   // Stored as a string so the input can be temporarily empty while the user
   // edits — on mobile a controlled `value={0}` would re-insert the leading 0
@@ -863,18 +879,22 @@ function RevenueCalculator({
   const weeksSinceLaunch = launchTs ? Math.max(0.5, (now - launchTs) / (7 * 86400)) : 1
   const avgWeekly = totalRev / weeksSinceLaunch
 
-  // Share = user's tokens / total supply.
+  // Share-of-supply (always shown alongside the verified share for context).
   const sharePct = totalSupply > 0 ? (tokens / totalSupply) * 100 : 0
-  const userWeeklyNow = avgWeekly * 0.5 * (sharePct / 100)
+
+  // Verified-share math: payout pool is split pro-rata across verified balances
+  // only. Smaller verified denominator → bigger slice for each verified holder.
+  // We assume the user IS verified for the "if you're verified" scenario; if
+  // verified data hasn't loaded yet (cold start, etc.) fall back to tokens /
+  // totalSupply so the calculator still produces a number.
+  const hasVerified = verified != null && verified.totalBalance > 0
+  const verifiedDenominator = hasVerified ? verified!.totalBalance : totalSupply
+  const verifiedSharePct = verifiedDenominator > 0 ? (tokens / verifiedDenominator) * 100 : 0
+  const userWeeklyNow = avgWeekly * 0.5 * (verifiedSharePct / 100)
   const userWeeklyAtGrowth = userWeeklyNow * growth
   const userAnnualAtGrowth = userWeeklyAtGrowth * 52
 
   const fmtUsdInline = (sol: number) => price ? ` ≈ $${nf0.format(sol * price)}` : ''
-  const fmtTokens = (n: number) => {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`
-    return nf0.format(n)
-  }
 
   return (
     <div className="panel">
@@ -896,8 +916,13 @@ function RevenueCalculator({
               onChange={(e) => setTokensStr(e.target.value)}
               onFocus={(e) => e.currentTarget.select()}
             />
-            <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>= {sharePct.toFixed(3)}%</span>
+            <span className="calc-input-pct">= {sharePct.toFixed(3)}%</span>
           </span>
+          {hasVerified && (
+            <span className="calc-hint">
+              <span className="accent">{verifiedSharePct.toFixed(3)}%</span> of {fmtTokensCompact(verified!.totalBalance)} verified pool
+            </span>
+          )}
         </label>
 
         <label className="calc-input">
@@ -917,7 +942,7 @@ function RevenueCalculator({
       </div>
 
       <div className="kpi-sub" style={{ marginTop: 8, marginBottom: 8 }}>
-        avg weekly revenue {fmtSol(avgWeekly)} SOL · 50% → users
+        avg weekly {fmtSol(avgWeekly)} SOL · 50% → {hasVerified ? 'verified holders' : 'users'}
       </div>
 
       <div className="calc-out">
