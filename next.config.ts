@@ -14,6 +14,19 @@ const config: NextConfig = {
       },
     ]
   },
+  // The HTML doc references hashed JS chunks. If a stale HTML is cached (esp.
+  // by macOS/iOS PWAs, which keep a private cache that's hard to flush), it
+  // can reference chunk hashes from a previous deploy that no longer exist on
+  // the server, breaking hydration. Forcing no-store on the document keeps
+  // PWAs (and CF) from serving stale HTML across deploys.
+  async headers() {
+    return [
+      {
+        source: '/',
+        headers: [{ key: 'Cache-Control', value: 'no-store' }],
+      },
+    ]
+  },
 }
 
 export default config
