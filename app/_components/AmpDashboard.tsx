@@ -920,7 +920,7 @@ function RevenueCalculator({
           </span>
           {hasVerified && (
             <span className="calc-hint">
-              <span className="accent">{verifiedSharePct.toFixed(3)}%</span> of {fmtTokensCompact(verified!.totalBalance)} verified pool
+              <span className="accent">{verifiedSharePct.toFixed(3)}%</span> of ~{fmtTokensCompact(verified!.totalBalance)} verified pool
             </span>
           )}
         </label>
