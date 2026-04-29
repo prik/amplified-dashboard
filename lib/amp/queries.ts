@@ -119,6 +119,14 @@ export interface Summary {
     netRevenueSol: number
     feeEvents: number
   }
+  // Deduped trader counts (each human counted once via trading→deposit
+  // pairing). Always returned; the dashboard only renders them when the
+  // easter egg is active. Falls back to raw counts shape so consumers can
+  // diff freely.
+  dedupe: {
+    totalsUniqueDepositors: number
+    windowUniqueDepositors: number
+  }
 }
 
 export function buildSummary(range: string, price: number | null, treasurySol: number | null): Summary {
@@ -343,6 +351,10 @@ export function buildSummary(range: string, price: number | null, treasurySol: n
       netRevenueSol: lamToSol(inLastPeriod.s - poolOutLastPeriod.s),
       feeEvents: inLastPeriod.n,
     },
+    dedupe: {
+      totalsUniqueDepositors: dedupedUniqueDepositorsLifetime(),
+      windowUniqueDepositors: dedupedUniqueDepositorsWindow(from, to),
+    },
   }
 }
 
@@ -460,13 +472,14 @@ export function buildNewUsers(range: string) {
 
 // ---- Fee distribution ----
 
-export function buildDistribution() {
+export function buildDistribution(range: string) {
+  const { from, to } = rangeToWindow(range)
   const notPool = excludedForTraders()
   const notPoolFilter = notPool.length > 0 ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})` : ''
   const rows = db.prepare(
     `SELECT amount_lamports AS lam FROM amp_txs
-     WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL} ORDER BY lam`
-  ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ lam: number }>
+     WHERE direction='in' AND block_time BETWEEN ? AND ? ${notPoolFilter}${DUST_SQL} ORDER BY lam`
+  ).all(from, to, ...notPool) as Array<{ lam: number }>
   const sols = rows.map((r) => lamToSol(r.lam))
   const n = sols.length
   const pct = (p: number) => (n === 0 ? 0 : sols[Math.min(n - 1, Math.floor(p * n))])
@@ -476,12 +489,17 @@ export function buildDistribution() {
     const idx = buckets.findIndex((b) => s >= b.lo && (b.hi === null || s < b.hi))
     if (idx >= 0) buckets[idx].n++
   }
+  // Trim trailing empty buckets so the chart doesn't render dead space at the
+  // top of the distribution. Keep at least one bucket so the chart isn't empty
+  // when the dataset is empty.
+  let lastWithData = buckets.length - 1
+  while (lastWithData > 0 && buckets[lastWithData].n === 0) lastWithData--
   return {
     count: n,
     median: pct(0.5),
     p95: pct(0.95),
     max: n === 0 ? 0 : sols[n - 1],
-    buckets,
+    buckets: buckets.slice(0, lastWithData + 1),
   }
 }
 
@@ -555,15 +573,16 @@ export function buildRetention() {
 // engagement tiers. Tells us how sticky Amplified is: lots of 1-and-done
 // wallets vs power users grinding 50+ trades.
 
-export function buildTradeFrequency() {
+export function buildTradeFrequency(range: string) {
+  const { from, to } = rangeToWindow(range)
   const notPool = excludedForTraders()
   const notPoolFilter = notPool.length > 0 ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})` : ''
 
   const rows = db.prepare(
     `SELECT counterparty, COUNT(*) AS n FROM amp_txs
-     WHERE direction='in' AND block_time >= ? ${notPoolFilter}${DUST_SQL}
+     WHERE direction='in' AND block_time BETWEEN ? AND ? ${notPoolFilter}${DUST_SQL}
      GROUP BY counterparty`
-  ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ counterparty: string; n: number }>
+  ).all(from, to, ...notPool) as Array<{ counterparty: string; n: number }>
 
   const buckets = [
     { label: '1', lo: 1,  hi: 1,        n: 0 },
@@ -634,19 +653,29 @@ export function buildLifetime() {
      GROUP BY day ORDER BY day`
   ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ day: string; n: number }>
 
+  // Deduped per-day series (each human counted once via wallet pairing). Used
+  // by the easter-egg-gated swap on the new-users / active-users / lifetime
+  // unique-users charts.
+  const dedupedNew = dedupedNewUsersByDay()
+  const dedupedActive = dedupedActiveUsersByDay()
+
   // Merge by day and compute running totals.
-  const index: Record<string, { rev: number; fees: number; newU: number; dau: number }> = {}
-  for (const r of rev) index[r.day] = { rev: r.lam, fees: r.n, newU: 0, dau: 0 }
-  for (const r of newU) { (index[r.day] ||= { rev: 0, fees: 0, newU: 0, dau: 0 }).newU = r.n }
-  for (const r of dau) { (index[r.day] ||= { rev: 0, fees: 0, newU: 0, dau: 0 }).dau = r.n }
+  const index: Record<string, { rev: number; fees: number; newU: number; dau: number; newUDedup: number; dauDedup: number }> = {}
+  const blank = () => ({ rev: 0, fees: 0, newU: 0, dau: 0, newUDedup: 0, dauDedup: 0 })
+  for (const r of rev)           { (index[r.day] ||= blank()).rev = r.lam; index[r.day].fees = r.n }
+  for (const r of newU)          { (index[r.day] ||= blank()).newU = r.n }
+  for (const r of dau)           { (index[r.day] ||= blank()).dau = r.n }
+  for (const r of dedupedNew)    { (index[r.day] ||= blank()).newUDedup = r.n }
+  for (const r of dedupedActive) { (index[r.day] ||= blank()).dauDedup = r.n }
 
   const days = Object.keys(index).sort()
-  let cumRev = 0, cumUsers = 0, cumFees = 0
+  let cumRev = 0, cumUsers = 0, cumFees = 0, cumUsersDedup = 0
   const points = days.map((day) => {
     const d = index[day]
     cumRev += d.rev
     cumFees += d.fees
     cumUsers += d.newU
+    cumUsersDedup += d.newUDedup
     return {
       day,
       revenueSol: lamToSol(d.rev),
@@ -656,6 +685,10 @@ export function buildLifetime() {
       cumRevenueSol: lamToSol(cumRev),
       cumUsers,
       cumFees,
+      // Deduped variants (easter-egg-gated on the frontend).
+      newUsersDedup: d.newUDedup,
+      activeUsersDedup: d.dauDedup,
+      cumUsersDedup,
     }
   })
 
@@ -669,13 +702,18 @@ export function buildLifetime() {
 export function buildFeed(limit: number) {
   const n = Math.min(Math.max(1, limit), 200)
   const rows = db.prepare(
-    `SELECT signature, slot, block_time, direction, counterparty, amount_lamports
+    `SELECT signature, slot, block_time, direction, counterparty, amount_lamports, kind,
+            pool_delta_lam, is_open, is_liquidation, token_mint, leverage, collat_lam
      FROM amp_txs
      WHERE block_time >= ? AND (direction='out' OR amount_lamports >= ?)
      ORDER BY block_time DESC LIMIT ?`
   ).all(LAUNCH_TS_SEC, DUST_THRESHOLD_LAMPORTS, n) as Array<{
     signature: string; slot: number; block_time: number;
-    direction: 'in' | 'out'; counterparty: string; amount_lamports: number
+    direction: 'in' | 'out'; counterparty: string; amount_lamports: number;
+    kind: 'entry' | 'exit' | 'other' | null;
+    pool_delta_lam: number | null; is_open: 0 | 1 | null;
+    is_liquidation: 0 | 1 | null; token_mint: string | null;
+    leverage: number | null; collat_lam: number | null;
   }>
   return {
     rows: rows.map((r) => {
@@ -689,6 +727,11 @@ export function buildFeed(limit: number) {
             ? 'pool'
             : 'user_payout'
       }
+      // Trade direction label, derived from on-chain meta. null on legacy
+      // pre-backfill rows or non-trade events.
+      let trade: 'open' | 'close' | 'rekt' | null = null
+      if (r.is_open === 1) trade = 'open'
+      else if (r.is_open === 0) trade = r.is_liquidation === 1 ? 'rekt' : 'close'
       return {
         signature: r.signature,
         slot: r.slot,
@@ -697,9 +740,94 @@ export function buildFeed(limit: number) {
         counterparty: r.counterparty,
         amountSol: lamToSol(r.amount_lamports),
         category,
+        kind: r.kind,
+        trade,
+        tokenMint: r.token_mint,
+        leverage: r.leverage,
+        collatSol: r.collat_lam != null ? lamToSol(r.collat_lam) : null,
+        positionSol: r.collat_lam != null && r.leverage != null
+          ? lamToSol(r.collat_lam * r.leverage)
+          : null,
       }
     }),
   }
+}
+
+// ---- Deduped trader counts ----
+// "Deduped" applies the trading→deposit wallet pairing so a single human shows
+// up exactly once regardless of which leg(s) of which trade(s) they signed
+// with. Used by the easter-egg-gated KPI swaps. Fall back to counterparty
+// itself for inflows whose pairing isn't yet in amp_wallet_pairs (legacy rows
+// pre-backfill, pre-launch openers we never indexed, etc).
+
+export function dedupedUniqueDepositorsLifetime(): number {
+  const notPool = excludedForTraders()
+  const notPoolFilter = notPool.length > 0
+    ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})`
+    : ''
+  const row = db.prepare(
+    `SELECT COUNT(DISTINCT effective_id) AS n FROM (
+       SELECT COALESCE(p.deposit_wallet, t.counterparty) AS effective_id
+       FROM amp_txs t
+       LEFT JOIN amp_wallet_pairs p ON p.trading_wallet = t.counterparty
+       WHERE t.direction='in' AND t.block_time >= ? ${notPoolFilter}${DUST_SQL}
+     )`
+  ).get(LAUNCH_TS_SEC, ...notPool) as { n: number }
+  return row.n
+}
+
+export function dedupedUniqueDepositorsWindow(from: number, to: number): number {
+  const notPool = excludedForTraders()
+  const notPoolFilter = notPool.length > 0
+    ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})`
+    : ''
+  const row = db.prepare(
+    `SELECT COUNT(DISTINCT effective_id) AS n FROM (
+       SELECT COALESCE(p.deposit_wallet, t.counterparty) AS effective_id
+       FROM amp_txs t
+       LEFT JOIN amp_wallet_pairs p ON p.trading_wallet = t.counterparty
+       WHERE t.direction='in' AND t.block_time BETWEEN ? AND ? ${notPoolFilter}${DUST_SQL}
+     )`
+  ).get(from, to, ...notPool) as { n: number }
+  return row.n
+}
+
+// New users per UTC day, but each unique HUMAN counted once on the day their
+// effective identity (mapped deposit wallet) first appeared.
+export function dedupedNewUsersByDay(): Array<{ day: string; n: number }> {
+  const notPool = excludedForTraders()
+  const notPoolFilter = notPool.length > 0
+    ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})`
+    : ''
+  const rows = db.prepare(
+    `SELECT DATE(first_seen, 'unixepoch') AS day, COUNT(*) AS n FROM (
+       SELECT COALESCE(p.deposit_wallet, t.counterparty) AS effective_id,
+              MIN(t.block_time) AS first_seen
+       FROM amp_txs t
+       LEFT JOIN amp_wallet_pairs p ON p.trading_wallet = t.counterparty
+       WHERE t.direction='in' AND t.block_time >= ? ${notPoolFilter}${DUST_SQL}
+       GROUP BY effective_id
+     )
+     GROUP BY day ORDER BY day`
+  ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ day: string; n: number }>
+  return rows
+}
+
+// Active "real users" per UTC day — distinct effective_id per day.
+export function dedupedActiveUsersByDay(): Array<{ day: string; n: number }> {
+  const notPool = excludedForTraders()
+  const notPoolFilter = notPool.length > 0
+    ? `AND counterparty NOT IN (${notPool.map(() => '?').join(',')})`
+    : ''
+  const rows = db.prepare(
+    `SELECT DATE(t.block_time, 'unixepoch') AS day,
+            COUNT(DISTINCT COALESCE(p.deposit_wallet, t.counterparty)) AS n
+     FROM amp_txs t
+     LEFT JOIN amp_wallet_pairs p ON p.trading_wallet = t.counterparty
+     WHERE t.direction='in' AND t.block_time >= ? ${notPoolFilter}${DUST_SQL}
+     GROUP BY day ORDER BY day`
+  ).all(LAUNCH_TS_SEC, ...notPool) as Array<{ day: string; n: number }>
+  return rows
 }
 
 // ---- Verified balances ----
