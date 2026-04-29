@@ -5,7 +5,7 @@ import {
   ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Area, AreaChart, BarChart, Bar, Brush,
 } from 'recharts'
 import {
-  usePolled, useAmpLiveEvents, useTheme,
+  usePolled, useAmpLiveEvents, useTheme, useEasterEgg, useTokenSymbols,
   Range, Summary, Heatmap, Feed, Distribution, Retention, TradeFrequency,
   Lifetime, Timeseries, FeedRow, LifetimePoint, ThemeColors, Verified,
 } from './hooks'
@@ -60,15 +60,20 @@ export function AmpDashboard() {
   const heatRange = range === '24h' ? '7d' : range
   const { data: heatmap } = usePolled<Heatmap>(`/api/amp/heatmap?range=${heatRange}`, 120_000)
   const { data: feed } = usePolled<Feed>('/api/amp/feed?limit=50', 15_000)
-  const { data: distribution } = usePolled<Distribution>('/api/amp/distribution', 120_000)
+  const { data: distribution } = usePolled<Distribution>(`/api/amp/distribution?range=${range}`, 120_000)
   const { data: retention } = usePolled<Retention>('/api/amp/retention', 300_000)
   const { data: lifetime } = usePolled<Lifetime>('/api/amp/lifetime', 120_000)
-  const { data: tradeFreq } = usePolled<TradeFrequency>('/api/amp/trade-frequency', 120_000)
+  const { data: tradeFreq } = usePolled<TradeFrequency>(`/api/amp/trade-frequency?range=${range}`, 120_000)
   const { data: verified } = usePolled<Verified>('/api/amp/verified', 60_000)
   // Hourly resolution for the 1D preset on the revenue chart.
   const { data: hourly } = usePolled<Timeseries>('/api/amp/timeseries?range=24h', 60_000)
   const { connected: liveConnected } = useAmpLiveEvents()
   const { theme, colors, toggle: toggleTheme } = useTheme()
+  const { active: eggActive, deactivate: deactivateEgg } = useEasterEgg()
+
+  // Resolve token symbols for the live feed rows. Cached client-side for the
+  // lifetime of the page (mints don't change).
+  const tokenSymbols = useTokenSymbols(feed?.rows ?? [])
 
   return (
     <>
@@ -82,6 +87,18 @@ export function AmpDashboard() {
           </h1>
         </div>
         <div className="meta">
+          {eggActive && (
+            <button
+              type="button"
+              className="egg-chip"
+              onClick={deactivateEgg}
+              title="Click to turn off hidden features"
+              aria-label="Disable easter egg mode"
+            >
+              <span className="egg-chip-icon">✦</span>
+              EGG ON
+            </button>
+          )}
           <span
             className={`live-chip ${liveConnected ? '' : 'live-chip-off'}`}
             title={liveConnected ? 'Live push connected, data updates on every new tx' : 'Reconnecting…'}
@@ -130,7 +147,9 @@ export function AmpDashboard() {
             <span className="label">txs</span>
           </span>
           <span>
-            <strong className="mono accent">{nf0.format(summary?.totals.uniqueDepositors ?? 0)}</strong>
+            <strong className="mono accent">
+              {nf0.format(summary?.dedupe.totalsUniqueDepositors ?? 0)}
+            </strong>
             <span className="label">unique traders</span>
           </span>
           <span>
@@ -141,6 +160,12 @@ export function AmpDashboard() {
             <span className="muted mono" style={{ fontSize: 11 }}>
               {fmtUsd(summary?.treasurySol ?? null, summary?.price)}
             </span>
+          </span>
+          <span>
+            <strong className="mono accent">
+              {verified ? `~${fmtTokensCompact(verified.totalBalance)}` : '—'}
+            </strong>
+            <span className="label">$AMPS verified</span>
           </span>
         </div>
 
@@ -155,10 +180,10 @@ export function AmpDashboard() {
           />
           <Kpi
             label={`Unique traders · ${range.toUpperCase()}`}
-            big={nf0.format(summary?.window.uniqueDepositors ?? 0)}
+            big={nf0.format(summary?.dedupe.windowUniqueDepositors ?? 0)}
             sub={
               summary
-                ? `${summary.window.uniqueDepositorsDelta >= 0 ? '+' : ''}${summary.window.uniqueDepositorsDelta} vs prev${range === 'all' ? '' : ` · all-time ${nf0.format(summary.totals.uniqueDepositors)}`}`
+                ? `${summary.window.uniqueDepositorsDelta >= 0 ? '+' : ''}${summary.window.uniqueDepositorsDelta} vs prev${range === 'all' ? '' : ` · all-time ${nf0.format(summary.dedupe.totalsUniqueDepositors)}`}`
                 : '—'
             }
             delta={null}
@@ -207,7 +232,7 @@ export function AmpDashboard() {
               <span className="section-title">Live feed</span>
               <span className="label">latest fees</span>
             </div>
-            <CompactLiveFeed rows={feed?.rows || []} />
+            <CompactLiveFeed rows={feed?.rows || []} tokenSymbols={tokenSymbols} />
           </div>
 
           <div className="panel chart-panel">
@@ -227,7 +252,6 @@ export function AmpDashboard() {
             launchTs={summary?.launchTs ?? null}
             price={summary?.price ?? null}
             totalSupply={summary?.totalSupply ?? 1_000_000_000}
-            verified={verified ?? null}
           />
         </div>
 
@@ -239,7 +263,7 @@ export function AmpDashboard() {
             latestLabel="TODAY"
             data={lifetime?.days || []}
             xKey="day"
-            yKey="activeUsers"
+            yKey="activeUsersDedup"
             fmt={(v) => nf0.format(v)}
             bar
             colors={colors}
@@ -250,7 +274,7 @@ export function AmpDashboard() {
             latestLabel="TODAY"
             data={lifetime?.days || []}
             xKey="day"
-            yKey="newUsers"
+            yKey="newUsersDedup"
             fmt={(v) => `+${nf0.format(v)}`}
             bar
             colors={colors}
@@ -275,7 +299,7 @@ export function AmpDashboard() {
             subtitle="cumulative · since launch"
             data={lifetime?.days || []}
             xKey="day"
-            yKey="cumUsers"
+            yKey="cumUsersDedup"
             fmt={(v) => nf0.format(v)}
             colors={colors}
           />
@@ -730,11 +754,17 @@ function HeatmapGrid({ cells, colors }: { cells: { dow: number; hour: number; n:
   )
 }
 
-// Two-column compact feed (Time · Amount). Only "fee" inflows are shown so the
+// Compact feed (Time · [pill] Amount). Only "fee" inflows are shown so the
 // rolling tape always represents new user trades — pool refunds and operator
-// withdrawals are noise here. Sized to match the revenue chart's height.
-function CompactLiveFeed({ rows }: { rows: FeedRow[] }) {
-  const fees = rows.filter((r) => r.category === 'fee').slice(0, 12)
+// withdrawals are noise here. Last 50, scrollable. Each row shows an
+// OPEN / CLOSE pill plus the token + leverage resolved from on-chain trade
+// meta. REKT (liquidation) closes are hidden from the visual feed; their
+// fees still accrue to all revenue aggregates.
+function CompactLiveFeed({ rows, tokenSymbols }: {
+  rows: FeedRow[]
+  tokenSymbols: Map<string, string>
+}) {
+  const fees = rows.filter((r) => r.category === 'fee' && r.trade !== 'rekt').slice(0, 50)
   if (fees.length === 0) {
     return <div style={{ padding: 20, textAlign: 'center' }} className="muted">indexing…</div>
   }
@@ -743,11 +773,33 @@ function CompactLiveFeed({ rows }: { rows: FeedRow[] }) {
       {fees.map((r) => (
         <div className="compact-feed-row" key={r.signature}>
           <span className="muted mono">{fmtAgo(r.blockTime)}</span>
-          <span className="accent mono">{fmtSol(r.amountSol)} SOL</span>
+          <span className="compact-feed-amt">
+            <TradePill trade={r.trade} />
+            {r.tokenMint && (
+              <span className="fee-token">{tokenSymbols.get(r.tokenMint) ?? `${r.tokenMint.slice(0, 5)}…`}</span>
+            )}
+            {r.leverage != null && (
+              <span className="fee-lev">{r.leverage}x</span>
+            )}
+            <span className="accent mono">{fmtSol(r.amountSol)} SOL</span>
+          </span>
         </div>
       ))}
     </div>
   )
+}
+
+function TradePill({ trade }: { trade: FeedRow['trade'] }) {
+  if (!trade) return null
+  const cls =
+    trade === 'open'  ? 'fee-pill-open'  :
+    trade === 'close' ? 'fee-pill-close' :
+                        'fee-pill-rekt'
+  const label =
+    trade === 'open'  ? 'OPEN'  :
+    trade === 'close' ? 'CLOSE' :
+                        'REKT'
+  return <span className={`fee-pill ${cls}`}>{label}</span>
 }
 
 function DistBars({ dist }: { dist: Distribution | null }) {
@@ -783,6 +835,7 @@ function DistBars({ dist }: { dist: Distribution | null }) {
               className="b"
               style={{ height: `${(b.n / max) * 100}%` }}
               data-tooltip={`${fmtEdge(b.lo)}–${fmtEdge(b.hi)} SOL · ${b.n} fees`}
+              data-edge={i < 2 ? 'left' : i >= dist.buckets.length - 2 ? 'right' : undefined}
             />
           ))}
         </div>
@@ -849,15 +902,13 @@ function TradeFrequencyCard({ data, colors }: { data: TradeFrequency | null; col
 }
 
 // "What if" calculator: enter your token holdings + a growth multiplier,
-// see what your weekly / annual payouts look like at that scenario. When the
-// indexer has a verified-balance snapshot for the current period, the share is
-// derived from tokens / verified-supply (the real denominator the project pays
-// against); otherwise it falls back to tokens / totalSupply.
+// see what your weekly / annual payouts look like at that scenario. Rev share
+// is paid pro-rata across total supply: weeklyRev × 0.5 × (tokens / supply).
 function RevenueCalculator({
-  days, launchTs, price, totalSupply, verified,
+  days, launchTs, price, totalSupply,
 }: {
   days: LifetimePoint[]; launchTs: number | null; price: number | null;
-  totalSupply: number; verified: Verified | null;
+  totalSupply: number;
 }) {
   // Default token amount: 1% of supply (a reasonable starter scenario).
   // Stored as a string so the input can be temporarily empty while the user
@@ -885,21 +936,8 @@ function RevenueCalculator({
   const weeksSinceLaunch = launchTs ? Math.max(0.5, (now - launchTs) / (7 * 86400)) : 1
   const avgWeekly = totalRev / weeksSinceLaunch
 
-  // Share-of-supply (always shown alongside the verified share for context).
   const sharePct = totalSupply > 0 ? (tokens / totalSupply) * 100 : 0
-
-  // Verified-share math: payout pool is split pro-rata across verified balances
-  // only. Smaller verified denominator → bigger slice for each verified holder.
-  // We assume the user IS verified for the "if you're verified" scenario; if
-  // verified data hasn't loaded yet (cold start, etc.) fall back to tokens /
-  // totalSupply so the calculator still produces a number. `verifiedPool` is
-  // typed as Verified|null so a truthy check narrows it everywhere downstream
-  // — no non-null assertions needed.
-  const verifiedPool: Verified | null =
-    verified != null && verified.totalBalance > 0 ? verified : null
-  const verifiedDenominator = verifiedPool ? verifiedPool.totalBalance : totalSupply
-  const verifiedSharePct = verifiedDenominator > 0 ? (tokens / verifiedDenominator) * 100 : 0
-  const userWeeklyNow = avgWeekly * 0.5 * (verifiedSharePct / 100)
+  const userWeeklyNow = avgWeekly * 0.5 * (sharePct / 100)
   const userWeeklyAtGrowth = userWeeklyNow * growth
   const userAnnualAtGrowth = userWeeklyAtGrowth * 52
 
@@ -946,7 +984,7 @@ function RevenueCalculator({
       </div>
 
       <div className="kpi-sub" style={{ marginTop: 8, marginBottom: 8 }}>
-        avg weekly {fmtSol(avgWeekly)} SOL · 50% → {verifiedPool ? 'verified holders' : 'users'}
+        avg weekly {fmtSol(avgWeekly)} SOL · 50% → users
       </div>
 
       <div className="calc-out">

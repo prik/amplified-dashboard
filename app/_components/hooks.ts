@@ -91,6 +91,102 @@ export function useTheme(): { theme: Theme; colors: ThemeColors; toggle: () => v
   return { theme, colors: theme === 'light' ? LIGHT_COLORS : DARK_COLORS, toggle }
 }
 
+// Resolve a batch of token mints to their pump.fun symbols. Caches across the
+// page lifetime in a module-level Map so repeated polls don't hit the API
+// again. Misses are fetched once via /api/amp/tokens (server batches and DB-
+// caches further). Used by the easter-egg-gated live feed.
+const tokenSymbolMemo = new Map<string, string | null>()
+
+export function useTokenSymbols(rows: { tokenMint: string | null }[]): Map<string, string> {
+  const [, force] = useState(0)
+  const mints = rows.map((r) => r.tokenMint).filter((m): m is string => !!m)
+
+  useEffect(() => {
+    const missing = Array.from(new Set(mints.filter((m) => !tokenSymbolMemo.has(m))))
+    if (missing.length === 0) return
+    let cancelled = false
+    fetch('/api/amp/tokens', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mints: missing }),
+    })
+      .then((r) => r.json())
+      .then((j: { meta?: Record<string, { symbol?: string; name?: string }> }) => {
+        if (cancelled) return
+        // Mark every requested mint as "looked up" so we don't refetch nulls
+        // in a tight poll loop.
+        for (const m of missing) tokenSymbolMemo.set(m, null)
+        for (const [mint, info] of Object.entries(j.meta ?? {})) {
+          if (info?.symbol) tokenSymbolMemo.set(mint, info.symbol)
+        }
+        force((x) => x + 1)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mints.join('|')])
+
+  const out = new Map<string, string>()
+  for (const m of mints) {
+    const v = tokenSymbolMemo.get(m)
+    if (v) out.set(m, v)
+  }
+  return out
+}
+
+// Hidden-features unlock. Listens for the literal sequence "easteregg" typed
+// anywhere on the page. On match, sets `active=true`, persists to localStorage,
+// and fires a window-level event so a celebration component can react. Once
+// activated, all easter-egg-gated features render. The user can toggle off via
+// `localStorage.removeItem('amp_easteregg')` (or via a key combo we don't
+// expose). When a feature is "ready for production" we'll drop the gate
+// entirely — until then everything new lives behind this flag.
+const EASTEREGG_TARGET = 'easteregg'
+const EASTEREGG_STORAGE_KEY = 'amp_easteregg'
+export const EASTEREGG_EVENT = 'amp-easteregg-activated'
+
+export function useEasterEgg(): { active: boolean; deactivate: () => void } {
+  const [active, setActive] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (localStorage.getItem(EASTEREGG_STORAGE_KEY) === '1') setActive(true)
+
+    let buf = ''
+    const onKey = (e: KeyboardEvent) => {
+      // Only consider single-char alphanumeric keys; anything else (space,
+      // arrows, modifiers) resets the buffer so the sequence has to be typed
+      // contiguously without interruptions.
+      if (e.key.length !== 1 || !/[a-zA-Z]/.test(e.key)) {
+        buf = ''
+        return
+      }
+      // Don't capture inside text inputs — the user might legitimately type
+      // "easteregg" elsewhere and we shouldn't fire spuriously.
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return
+      }
+      buf = (buf + e.key.toLowerCase()).slice(-EASTEREGG_TARGET.length)
+      if (buf === EASTEREGG_TARGET) {
+        localStorage.setItem(EASTEREGG_STORAGE_KEY, '1')
+        setActive(true)
+        window.dispatchEvent(new CustomEvent(EASTEREGG_EVENT))
+        buf = ''
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const deactivate = () => {
+    try { localStorage.removeItem(EASTEREGG_STORAGE_KEY) } catch {}
+    setActive(false)
+  }
+
+  return { active, deactivate }
+}
+
 // Open an EventSource to /api/amp/events with auto-reconnect + watchdog. The
 // browser's built-in retry isn't always reliable behind reverse proxies that
 // idle-close streams, so we also force a reconnect if no message has arrived
@@ -201,6 +297,10 @@ export interface Summary {
     netRevenueSol: number
     feeEvents: number
   }
+  dedupe: {
+    totalsUniqueDepositors: number
+    windowUniqueDepositors: number
+  }
 }
 
 export interface TimePoint { t: number; revenueSol: number; payoutsSol: number; feeEvents: number; payoutEvents: number }
@@ -220,6 +320,17 @@ export interface FeedRow {
   counterparty: string
   amountSol: number
   category: 'fee' | 'user_payout' | 'operator' | 'pool'
+  // Inflow-only: did the user gain ('entry'), lose ('exit'), or have ambiguous
+  // ('other') token movement during this fee tx? null on outflows or legacy
+  // rows that haven't been backfilled yet.
+  kind: 'entry' | 'exit' | 'other' | null
+  // Trade direction derived from the on-chain pool-wallet delta sign + close
+  // liquidation heuristic.
+  trade: 'open' | 'close' | 'rekt' | null
+  tokenMint: string | null
+  leverage: number | null
+  collatSol: number | null
+  positionSol: number | null
 }
 export interface Feed { rows: FeedRow[] }
 
@@ -254,6 +365,11 @@ export interface LifetimePoint {
   cumRevenueSol: number
   cumUsers: number
   cumFees: number
+  // Deduped variants — same shape, but each unique HUMAN counted once via the
+  // trading→deposit pairing. Easter-egg-gated swap on the frontend.
+  newUsersDedup: number
+  activeUsersDedup: number
+  cumUsersDedup: number
 }
 export interface Lifetime { days: LifetimePoint[]; launchTs: number; now: number }
 

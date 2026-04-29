@@ -1,4 +1,5 @@
 import { AmpDashboard } from './_components/AmpDashboard'
+import { EasterEggCelebration } from './_components/EasterEggCelebration'
 
 export default function Page() {
   return (
@@ -14,6 +15,7 @@ export default function Page() {
         </p>
       </header>
       <AmpDashboard />
+      <EasterEggCelebration />
     </>
   )
 }

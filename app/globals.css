@@ -528,12 +528,14 @@ a { color: inherit; text-decoration: none; }
   pointer-events: none;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
-.heatmap .hm-cell[data-edge="right"][data-tooltip]:hover::after {
+.heatmap .hm-cell[data-edge="right"][data-tooltip]:hover::after,
+.dist-bar .b[data-edge="right"][data-tooltip]:hover::after {
   left: auto;
   right: 0;
   transform: none;
 }
-.heatmap .hm-cell[data-edge="left"][data-tooltip]:hover::after {
+.heatmap .hm-cell[data-edge="left"][data-tooltip]:hover::after,
+.dist-bar .b[data-edge="left"][data-tooltip]:hover::after {
   left: 0;
   transform: none;
 }
@@ -583,8 +585,11 @@ a { color: inherit; text-decoration: none; }
 
 /* Live-feed panel makes its body fill the panel so the feed list is as tall
    as the chart panel next to it (CSS grid stretches both to equal height). */
-.feed-panel { display: flex; flex-direction: column; }
-.feed-panel .compact-feed { flex: 1; min-height: 280px; }
+.feed-panel { display: flex; flex-direction: column; min-height: 0; }
+/* min-height:0 lets the inner scroll-area collapse below content size; the
+   max-height keeps a 50-row feed inside the chart-row's visual height instead
+   of letting the panel grow tall and stretching the grid row. */
+.feed-panel .compact-feed { flex: 1; min-height: 280px; max-height: 320px; }
 
 /* Compact 2-col feed used beside the revenue chart. Tape-style. */
 .compact-feed {
@@ -602,9 +607,143 @@ a { color: inherit; text-decoration: none; }
 }
 .compact-feed-row:last-child { border-bottom: none; }
 .compact-feed-row:first-child { animation: amp-flash 0.6s ease-out; }
+.compact-feed-amt {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+/* Tag for entry vs exit on each fee row. Greenish for OPEN (gain), reddish for
+   CLOSE (sell), neutral for ambiguous. Sized small so it doesn't dominate the
+   tape. */
+.fee-pill {
+  display: inline-block;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  line-height: 1.4;
+}
+.fee-pill-open  { color: var(--amp-accent); border-color: color-mix(in srgb, var(--amp-accent) 45%, transparent); background: color-mix(in srgb, var(--amp-accent) 10%, transparent); }
+.fee-pill-close { color: var(--amp-blue); border-color: color-mix(in srgb, var(--amp-blue) 45%, transparent); background: color-mix(in srgb, var(--amp-blue) 10%, transparent); }
+.fee-pill-rekt  { color: var(--amp-red); border-color: color-mix(in srgb, var(--amp-red) 50%, transparent); background: color-mix(in srgb, var(--amp-red) 12%, transparent); }
+.fee-pill-other { color: var(--amp-muted); border-color: var(--amp-line); background: transparent; }
+.fee-lev {
+  font-size: 9px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--amp-muted);
+  letter-spacing: 0.4px;
+}
+.fee-token {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--amp-text);
+  font-weight: 500;
+}
 @keyframes amp-flash {
   0%   { background: rgba(185, 255, 102, 0.18); }
   100% { background: transparent; }
+}
+
+/* Persistent "EGG ON" chip in the topbar — visible only while hidden features
+   are unlocked. Clicking it deactivates easter egg mode. Subtle so it doesn't
+   compete with the LIVE / range chips. */
+.egg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--amp-accent);
+  border: 1px solid var(--amp-accent);
+  background: var(--amp-accent-tint);
+  border-radius: 2px;
+  text-transform: uppercase;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.egg-chip:hover {
+  background: var(--amp-accent-tint-strong);
+}
+.egg-chip:focus-visible {
+  outline: 2px solid var(--amp-accent);
+  outline-offset: 2px;
+}
+.egg-chip-icon {
+  display: inline-block;
+  animation: egg-spark-twinkle 1.4s ease-in-out infinite alternate;
+}
+
+/* ----- Easter egg unlock celebration ----- */
+.egg-celebration {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+}
+.egg-confetti { position: absolute; inset: 0; overflow: hidden; }
+.egg-piece {
+  position: absolute;
+  top: -16px;
+  width: 8px;
+  height: 14px;
+  border-radius: 1px;
+  opacity: 0;
+  animation-name: egg-fall;
+  animation-timing-function: cubic-bezier(0.2, 0.7, 0.4, 1);
+  animation-fill-mode: forwards;
+}
+@keyframes egg-fall {
+  0%   { transform: translate3d(0, -10vh, 0) rotate(0); opacity: 0; }
+  10%  { opacity: 1; }
+  100% { transform: translate3d(var(--drift, 0), 105vh, 0) rotate(var(--rot-end, 360deg)); opacity: 0.9; }
+}
+.egg-toast {
+  position: absolute;
+  left: 50%;
+  top: 28%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 22px;
+  background: var(--amp-panel);
+  border: 1px solid var(--amp-accent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 4px color-mix(in srgb, var(--amp-accent) 18%, transparent);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--amp-text);
+  animation: egg-toast-in 0.4s ease-out forwards, egg-toast-out 0.4s ease-in 3.6s forwards;
+}
+.egg-toast strong { color: var(--amp-accent); }
+.egg-toast-spark {
+  color: var(--amp-accent);
+  font-size: 16px;
+  animation: egg-spark-twinkle 0.9s ease-in-out infinite alternate;
+}
+@keyframes egg-toast-in {
+  0%   { transform: translateX(-50%) translateY(-12px) scale(0.9); opacity: 0; }
+  100% { transform: translateX(-50%) translateY(0) scale(1); opacity: 1; }
+}
+@keyframes egg-toast-out {
+  0%   { opacity: 1; }
+  100% { transform: translateX(-50%) translateY(-12px) scale(0.95); opacity: 0; }
+}
+@keyframes egg-spark-twinkle {
+  0%   { transform: scale(1) rotate(0); opacity: 0.6; }
+  100% { transform: scale(1.25) rotate(60deg); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .egg-piece, .egg-toast, .egg-toast-spark { animation: none; }
+  .egg-toast { opacity: 1; }
 }
 
 .feed { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; }
