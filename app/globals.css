@@ -17,6 +17,7 @@
   --amp-blue: #6ad0ff;
   --amp-accent-tint: rgba(185, 255, 102, 0.06);
   --amp-accent-tint-strong: rgba(185, 255, 102, 0.18);
+  --amp-accent-pulse: rgba(185, 255, 102, 0.55);
   --chart-grid: #1b1b1b;
   --chart-axis: #555555;
   --chart-tick: #ededed;
@@ -37,6 +38,7 @@
   --amp-blue: #1976c2;
   --amp-accent-tint: rgba(61, 140, 0, 0.10);
   --amp-accent-tint-strong: rgba(61, 140, 0, 0.22);
+  --amp-accent-pulse: rgba(61, 140, 0, 0.55);
   --chart-grid: #e5e5df;
   --chart-axis: #a0a0a0;
   --chart-tick: #1c1c1c;
@@ -107,7 +109,11 @@ a { color: inherit; text-decoration: none; }
   line-height: 1.1;
   word-break: break-word;
 }
-@media (max-width: 640px) {
+.kpi-big-sub { font-size: 13px; font-weight: 400; margin-left: 8px; }
+@media (max-width: 680px) {
+  .kpi-big-sub { display: block; margin-left: 0; margin-top: 4px; }
+}
+@media (max-width: 680px) {
   .kpi-value { font-size: 22px; }
   .panel { padding: 12px; }
 }
@@ -130,7 +136,6 @@ a { color: inherit; text-decoration: none; }
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
   padding: 14px 20px;
@@ -140,6 +145,11 @@ a { color: inherit; text-decoration: none; }
   top: 0;
   z-index: 5;
 }
+/* .meta gets pushed to the right edge of its row via auto-margin (replaces
+   topbar's justify-content: space-between, which doesn't compose well once
+   the topbar has 4 flex children — brand, fee-wallet, meta, CTA — instead
+   of 2). */
+.topbar .meta { margin-left: auto; }
 
 .topbar .brand {
   display: flex;
@@ -164,13 +174,96 @@ a { color: inherit; text-decoration: none; }
   color: var(--amp-muted);
   font-size: 11px;
 }
-/* On mobile, when .meta wraps to its own row it spans full width so
-   LIVE DATA sits on the left edge and the range switch on the right. */
-@media (max-width: 640px) {
+/* On mobile (≤480) only, .meta drops onto its own row at full width with its
+   children (LIVE chip, range switch, theme switch) spread via space-between.
+   Above 480 the meta sits inline on the right via margin-left: auto. */
+@media (max-width: 480px) {
   .topbar .meta {
     width: 100%;
     justify-content: space-between;
     gap: 10px;
+  }
+}
+
+/* Centered TG-Bot CTA in the topbar. Absolutely positioned so it stays
+   truly centered regardless of brand/meta widths. Filled accent fill matches
+   the dashboard's terminal aesthetic (sharp corners, mono, uppercase) and
+   stands out as the primary action. Hidden on narrow screens where it would
+   overlap the brand/meta blocks. */
+.topbar-cta {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--amp-accent);
+  background: var(--amp-accent-tint);
+  color: var(--amp-accent);
+  border-radius: 2px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  line-height: 1;
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+/* Radar pulse on a pseudo-element so the keyframed box-shadow doesn't
+   stomp the button's own hover box-shadow. */
+.topbar-cta::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  animation: topbar-cta-pulse 30s ease-out infinite;
+}
+.topbar-cta::after {
+  content: '→';
+  font-size: 12px;
+  letter-spacing: 0;
+  transition: transform 0.2s;
+}
+.topbar-cta:hover {
+  background: var(--amp-accent-tint-strong);
+  box-shadow: 0 0 0 1px var(--amp-accent-tint-strong);
+}
+.topbar-cta:hover::after {
+  transform: translateX(2px);
+}
+/* Radar ping every 30s — ring expands and fades in ~1.2s, then rests for ~28.8s.
+   Subtle on purpose; nudges the eye without being a banner ad. */
+@keyframes topbar-cta-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--amp-accent-pulse); }
+  4%   { box-shadow: 0 0 0 8px rgba(0, 0, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topbar-cta::before { animation: none; }
+}
+/* Below 1100px the absolute-centered CTA would overlap brand/meta. Drop it
+   into the topbar's flex flow as a sibling of .brand and .meta; flex-basis
+   100% + a high `order` value force it to wrap onto its own row below the
+   brand+meta row, where its inline-flex justify-content centers the text. */
+@media (max-width: 1099px) {
+  .topbar-cta {
+    /* relative (not static) so .topbar-cta::before stays anchored to the
+       button as a positioning ancestor for its inset:0 pulse ring. */
+    position: relative;
+    left: auto;
+    top: auto;
+    transform: none;
+    flex-basis: 100%;
+    order: 99;
+    justify-content: center;
+  }
+  .topbar-cta:hover {
+    transform: none;
   }
 }
 
@@ -188,22 +281,17 @@ a { color: inherit; text-decoration: none; }
   50%      { opacity: 0.5; box-shadow: 0 0 3px var(--amp-accent); }
 }
 
-/* Prominent LIVE DATA chip in the navbar */
+/* LIVE DATA indicator in the navbar — pulsing dot + text only, no box. */
 .live-chip {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  border: 1px solid var(--amp-accent);
-  background: var(--amp-accent-tint);
   color: var(--amp-accent);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.18em;
   line-height: 1;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  border-radius: 2px;
-  transition: background 0.2s;
 }
 
 .live-chip-dot {
@@ -230,23 +318,27 @@ a { color: inherit; text-decoration: none; }
 }
 
 .live-chip-off {
-  border-color: rgba(255, 92, 92, 0.4);
-  background: rgba(255, 92, 92, 0.08);
   color: var(--amp-red);
 }
 .live-chip-off .live-chip-dot { background: var(--amp-red); }
 .live-chip-off .live-chip-dot::after { background: var(--amp-red); }
 
-/* Mobile — shrink the topbar, break the long wallet address onto its own line */
-@media (max-width: 640px) {
+/* ≤680 — shrink fonts so the 3-row topbar layout (driven by the 481–790 rule
+   above) still fits on smaller phones. Layout structure is unchanged here. */
+@media (max-width: 680px) {
   .topbar { padding: 10px 12px; }
   .topbar .brand h1 { font-size: 15px; }
-  .topbar .brand a[href*="solscan"] {
-    width: 100%;
-    font-size: 9px;
-    word-break: break-all;
-  }
   .range-switch button { padding: 5px 9px; font-size: 10px; }
+}
+
+/* ≤480 (mobile) — switch to the 3-row layout: logo, meta, CTA. Each topbar
+   child takes its own row via flex-basis: 100%, and `order` puts them in
+   the right vertical sequence. */
+@media (max-width: 480px) {
+  .topbar > * { flex-basis: 100%; }
+  .topbar > .brand          { order: 1; }
+  .topbar > .meta           { order: 2; margin-left: 0; }
+  .topbar > .topbar-cta     { order: 3; }
 }
 
 .range-switch {
@@ -277,35 +369,70 @@ a { color: inherit; text-decoration: none; }
 .grid-1px > * { min-width: 0; }
 .panel { overflow: hidden; }
 
-/* Responsive grid classes — mobile-first. All rows collapse to a single
-   column on small screens and widen at ≥640px (sm) and ≥1024px (lg).
-   The KPI row stays 2x2 on mobile because the density-1 version looks sparse. */
+/* Responsive grid classes — three viewport bands for the multi-panel rows:
+   • <1100  → single column (everything full-width, mobile feel)
+   • 1100–1599 → "hero + 2 below" so 3-item rows don't render as 2 + 1 + empty
+   • ≥1600 → original 3- or 4-column desktop layout
+   The KPI row (r-grid-4) stays 2x2 on mobile because density-1 looks sparse. */
 .r-grid-3,
 .r-grid-2,
-.r-grid-2-wide { grid-template-columns: 1fr; }
+.r-grid-2-wide,
+.r-grid-adoption,
+.r-grid-lifetime { grid-template-columns: 1fr; }
 .r-grid-4 { grid-template-columns: 1fr 1fr; }
 
-@media (min-width: 640px) {
+@media (min-width: 681px) {
   .r-grid-4       { grid-template-columns: 1fr 1fr; }
-  .r-grid-3       { grid-template-columns: 1fr 1fr; }
   .r-grid-2       { grid-template-columns: 1fr 1fr; }
   .r-grid-2-wide  { grid-template-columns: 1fr 1fr; }
 }
 @media (min-width: 1024px) {
   .r-grid-4      { grid-template-columns: repeat(4, 1fr); }
-  .r-grid-3      { grid-template-columns: repeat(3, 1fr); }
   .r-grid-2      { grid-template-columns: 1fr 1fr; }
   .r-grid-2-wide { grid-template-columns: 2fr 1fr; }
 }
 
-/* Chart row: calc | chart | feed. Track widths line up with the KPI grid
-   above (4 columns of 1fr each): calc=1fr, chart=2fr (under KPI cols 2-3),
-   feed=1fr (under the 4th KPI). */
-.r-grid-chart-row { grid-template-columns: 1fr; }
-@media (min-width: 640px) {
-  .r-grid-chart-row { grid-template-columns: 1fr 1fr; }
+/* Hero+2 layout for the multi-panel rows from 681 (the mobile breakpoint) up
+   to 1599. Each row has 2 columns with the hero spanning the top:
+   • r-grid-3        → 1st child hero (Fee distribution)
+   • r-grid-adoption → 1st child hero (Active wallets)
+   • r-grid-lifetime → 3rd child hero (Heatmap; cum users + cum revenue tuck
+                       under it). */
+@media (min-width: 681px) and (max-width: 1599px) {
+  .r-grid-3,
+  .r-grid-adoption,
+  .r-grid-lifetime {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: "hero hero" "a b";
+  }
+  .r-grid-3        > :nth-child(1) { grid-area: hero; }
+  .r-grid-adoption > :nth-child(1) { grid-area: hero; }
+  .r-grid-lifetime > :nth-child(3) { grid-area: hero; }
 }
-@media (min-width: 1024px) {
+@media (min-width: 1600px) {
+  .r-grid-3,
+  .r-grid-adoption,
+  .r-grid-lifetime { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* Chart row: feed | chart | calc.
+   681–1599: chart spans full width on top, feed + calc share the row below.
+   ≥1600 reverts to the original 3-track layout where the chart sits under
+   KPI cols 2-3 (1fr 2fr 1fr). */
+.r-grid-chart-row { grid-template-columns: 1fr; }
+@media (max-width: 680px) {
+  .r-grid-chart-row > .chart-panel { order: -1; }
+}
+@media (min-width: 681px) and (max-width: 1599px) {
+  .r-grid-chart-row {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: "chart chart" "feed calc";
+  }
+  .r-grid-chart-row > :nth-child(1) { grid-area: feed; }
+  .r-grid-chart-row > :nth-child(2) { grid-area: chart; }
+  .r-grid-chart-row > :nth-child(3) { grid-area: calc; }
+}
+@media (min-width: 1600px) {
   .r-grid-chart-row { grid-template-columns: 1fr 2fr 1fr; }
 }
 
@@ -314,7 +441,7 @@ a { color: inherit; text-decoration: none; }
   margin: 0 auto;
   padding: 16px;
 }
-@media (max-width: 640px) {
+@media (max-width: 680px) {
   .page-inner { padding: 8px; }
 }
 
@@ -334,7 +461,7 @@ a { color: inherit; text-decoration: none; }
   border-bottom: 1px solid var(--amp-line-soft);
   font-size: 12px;
 }
-@media (max-width: 640px) {
+@media (max-width: 680px) {
   /* Drop the "Last seen" column, compact others */
   .lb-row {
     grid-template-columns: 24px 1fr 80px 50px;
@@ -366,10 +493,11 @@ a { color: inherit; text-decoration: none; }
 
 .heatmap {
   display: grid;
-  grid-template-columns: 22px repeat(24, 1fr);
+  grid-template-columns: 22px repeat(24, minmax(0, 1fr));
   gap: 2px;
   font-size: 10px;
 }
+.heatmap .hm-label { overflow: hidden; }
 .heatmap .hm-label { color: var(--amp-dim); font-size: 10px; display: flex; align-items: center; }
 .heatmap .hm-cell {
   position: relative;
@@ -400,6 +528,15 @@ a { color: inherit; text-decoration: none; }
   pointer-events: none;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
+.heatmap .hm-cell[data-edge="right"][data-tooltip]:hover::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.heatmap .hm-cell[data-edge="left"][data-tooltip]:hover::after {
+  left: 0;
+  transform: none;
+}
 
 /* Top status strip — centered, evenly distributed. Sits between the topbar
    and the KPI row. */
@@ -422,7 +559,7 @@ a { color: inherit; text-decoration: none; }
   white-space: nowrap;
 }
 .status-strip strong { font-weight: 500; font-size: 15px; }
-@media (max-width: 640px) {
+@media (max-width: 680px) {
   .status-strip { gap: 4px 12px; padding: 10px 12px; font-size: 11px; }
   .status-strip strong { font-size: 13px; }
 }
@@ -485,7 +622,7 @@ a { color: inherit; text-decoration: none; }
 }
 .feed-row.head-row { border-bottom: 1px solid var(--amp-line); }
 
-@media (max-width: 640px) {
+@media (max-width: 680px) {
   .feed-row {
     grid-template-columns: 44px 30px 90px 1fr 50px;
     gap: 6px;
@@ -527,9 +664,17 @@ a { color: inherit; text-decoration: none; }
   transition: color 0.18s;
 }
 .theme-switch-icon svg { width: 12px; height: 12px; }
+/* The crescent moon's visual mass sits in the upper-right of its 24x24
+   viewBox (geometric bbox is centered, but the lobe is asymmetric). Nudge
+   the moon SVG specifically so it looks centered inside the thumb circle. */
+.theme-switch-icon:last-child svg { transform: translate(-1px, 1px); }
 .theme-switch-thumb {
   position: absolute;
-  top: var(--pad);
+  /* Thumb sits directly behind the active icon. Flex padding (--pad = 3) puts
+     icons at left: 3 / right: 3 inside the padding-box. Vertical: padding-box
+     is 26px (28 outer - 2 borders) so 22px thumb wants top: 2 for symmetric
+     2px gaps, matching where align-items: center places the 22px icons. */
+  top: 2px;
   left: var(--pad);
   width: var(--thumb-size);
   height: var(--thumb-size);
@@ -543,7 +688,10 @@ a { color: inherit; text-decoration: none; }
    so dark mode = thumb on the right (moon), light mode = thumb on the left
    (sun). */
 .theme-switch.is-dark .theme-switch-thumb {
-  transform: translateX(calc(56px - var(--thumb-size) - (var(--pad) * 2)));
+  /* Slide distance = padding-box width (54 = 56 outer - 2 borders) - thumb -
+     2*pad. The original calc used 56 instead of 54 and ended up 2px past the
+     moon. */
+  transform: translateX(calc(54px - var(--thumb-size) - (var(--pad) * 2)));
 }
 /* Highlight the active-side icon: invert it on top of the thumb. */
 .theme-switch.is-light .theme-switch-icon:first-child { color: var(--amp-bg); }
@@ -558,7 +706,7 @@ a { color: inherit; text-decoration: none; }
   margin-bottom: 8px;
   padding-left: 36px;
 }
-@media (max-width: 640px) {
+@media (max-width: 680px) {
   .chart-presets { padding-left: 28px; }
 }
 .chart-presets button {
@@ -626,6 +774,17 @@ a { color: inherit; text-decoration: none; }
   border-radius: 0;
   outline: none;
   cursor: pointer;
+  /* Without this, mobile browsers treat a touch-drag on the slider as a page
+     swipe instead of letting the input handle it. */
+  touch-action: none;
+}
+/* Same fix for the recharts brush travellers — without touch-action:none the
+   handle can't be dragged on iOS Safari/Chrome because the touch is consumed
+   by the page scroller. */
+.recharts-brush rect.recharts-brush-traveller,
+.recharts-brush g.recharts-brush-traveller,
+.recharts-brush rect.recharts-brush-slide {
+  touch-action: none;
 }
 .calc-slider-row input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -677,3 +836,40 @@ a { color: inherit; text-decoration: none; }
   border-bottom: 1px dotted var(--amp-line);
 }
 .link-ext:hover { color: var(--amp-accent); border-bottom-color: var(--amp-accent); }
+
+/* Click-to-copy contract address rendered as a button — strip native button
+   chrome, inherit footer typography, and pop a tiny "copied!" bubble above
+   on success. */
+button.link-ext.copy-ca {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px dotted var(--amp-line);
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  position: relative;
+}
+.copy-ca[data-copied="1"] {
+  color: var(--amp-accent);
+  border-bottom-color: var(--amp-accent);
+}
+.copy-ca[data-copied="1"]::after {
+  content: 'copied!';
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--amp-panel);
+  border: 1px solid var(--amp-accent);
+  color: var(--amp-accent);
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}

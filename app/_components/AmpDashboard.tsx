@@ -20,7 +20,6 @@ const RANGES: { value: Range; label: string }[] = [
 const nf = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 })
 const nf0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
 const nf4 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 4 })
-const shortWallet = (w: string) => `${w.slice(0, 4)}…${w.slice(-4)}`
 
 function fmtSol(x: number | null | undefined) {
   if (x == null || Number.isNaN(x)) return '—'
@@ -34,6 +33,18 @@ function fmtUsd(sol: number | null | undefined, price: number | null | undefined
   if (usd >= 10_000) return `$${(usd / 1_000).toFixed(1)}K`
   return `$${nf.format(usd)}`
 }
+// Cap displayed current-period revenue at the live fee-wallet balance. Inflows
+// to the wallet have no counterparty filter so manual top-ups + non-fee
+// transfers can push gross revenue above what's actually sitting there. The
+// balance is the conservative truth: nothing's been "earned" that isn't
+// physically present (or already paid out, but those flow into past-period
+// figures, not the active accrual).
+function currentPeriodSol(summary: Summary | null | undefined): number | undefined {
+  if (!summary) return undefined
+  const rev = summary.sinceFriday.revenueSol
+  return summary.treasurySol != null ? Math.min(rev, summary.treasurySol) : rev
+}
+
 function fmtAgo(unix: number) {
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unix))
   if (s < 60) return `${s}s ago`
@@ -43,7 +54,7 @@ function fmtAgo(unix: number) {
 }
 
 export function AmpDashboard() {
-  const [range, setRange] = useState<Range>('7d')
+  const [range, setRange] = useState<Range>('all')
 
   const { data: summary } = usePolled<Summary>(`/api/amp/summary?range=${range}`, 30_000)
   const heatRange = range === '24h' ? '7d' : range
@@ -62,30 +73,17 @@ export function AmpDashboard() {
     <>
       <div className="topbar">
         <div className="brand">
-          <span className="tick">▸</span>
           <h1>
-            <a href="https://orbmarkets.io" target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>
+            <a href="/" style={{ color: 'inherit' }}>
               AMPLIFIED
             </a>{' '}
-            <span className="muted" style={{ fontWeight: 400 }}>░ dashboard</span>
+            <span className="muted" style={{ fontWeight: 400 }}>░ revenue dashboard</span>
           </h1>
-          {summary?.feeWallet && (
-            <a
-              className="mono muted link-ext"
-              href={`https://solscan.io/account/${summary.feeWallet}`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ fontSize: 11 }}
-              title="Solscan"
-            >
-              fee wallet {summary.feeWallet}
-            </a>
-          )}
         </div>
         <div className="meta">
           <span
             className={`live-chip ${liveConnected ? '' : 'live-chip-off'}`}
-            title={liveConnected ? 'Live push connected — data updates on every new tx' : 'Reconnecting…'}
+            title={liveConnected ? 'Live push connected, data updates on every new tx' : 'Reconnecting…'}
           >
             <span className="live-chip-dot" />
             {liveConnected ? 'LIVE DATA' : 'RECONNECTING'}
@@ -110,6 +108,11 @@ export function AmpDashboard() {
             <span className="theme-switch-thumb" aria-hidden="true" />
           </button>
         </div>
+        {/* CTA as a topbar-level flex item: at ≥1100 it's absolute-centered;
+            at <1100 it wraps onto its own row centered below brand+meta. */}
+        <a className="topbar-cta" href="/TG-Bot" target="_blank" rel="noreferrer">
+          Trade SOL memes with 2–10x leverage now
+        </a>
       </div>
 
       <div className="page-inner">
@@ -126,7 +129,11 @@ export function AmpDashboard() {
             <span className="label">txs</span>
           </span>
           <span>
-            <span className="label">treasury</span>
+            <strong className="mono accent">{nf0.format(summary?.totals.uniqueDepositors ?? 0)}</strong>
+            <span className="label">unique traders</span>
+          </span>
+          <span>
+            <span className="label">fee wallet</span>
             <strong className="mono accent">
               {summary?.treasurySol != null ? fmtSol(summary.treasurySol) : '—'} SOL
             </strong>
@@ -141,7 +148,7 @@ export function AmpDashboard() {
           <Kpi
             label={`Revenue · ${range.toUpperCase()}`}
             big={`${fmtSol(summary?.window.revenueSol)} SOL`}
-            sub={`${fmtUsd(summary?.window.revenueSol, summary?.price)} · ${nf0.format(summary?.window.feeEvents ?? 0)} fees · all-time ${fmtSol(summary?.totals.revenueSol)}`}
+            sub={`${fmtUsd(summary?.window.revenueSol, summary?.price)} · ${nf0.format(summary?.window.feeEvents ?? 0)} fees${range === 'all' ? '' : ` · all-time ${fmtSol(summary?.totals.revenueSol)}`}`}
             delta={summary?.window.revenueDeltaPct ?? null}
             deltaSuffix={`vs prev ${range}`}
           />
@@ -150,7 +157,7 @@ export function AmpDashboard() {
             big={nf0.format(summary?.window.uniqueDepositors ?? 0)}
             sub={
               summary
-                ? `${summary.window.uniqueDepositorsDelta >= 0 ? '+' : ''}${summary.window.uniqueDepositorsDelta} vs prev · all-time ${nf0.format(summary.totals.uniqueDepositors)}`
+                ? `${summary.window.uniqueDepositorsDelta >= 0 ? '+' : ''}${summary.window.uniqueDepositorsDelta} vs prev${range === 'all' ? '' : ` · all-time ${nf0.format(summary.totals.uniqueDepositors)}`}`
                 : '—'
             }
             delta={null}
@@ -162,24 +169,25 @@ export function AmpDashboard() {
               forming up for the next distribution). Not affected by the
               range filter above. */}
           <Kpi
-            label="Since Friday · next pool"
-            big={`${fmtSol(summary?.sinceFriday.revenueSol)} SOL`}
+            label={
+              summary?.sinceFriday.from
+                ? `Current period: ${new Date(summary.sinceFriday.from * 1000).toISOString().slice(0, 10)} → ${new Date((summary.sinceFriday.from + 7 * 86400) * 1000).toISOString().slice(0, 10)}`
+                : 'Current period'
+            }
+            big={`${fmtSol(currentPeriodSol(summary))} SOL`}
+            bigSub={summary ? fmtUsd(currentPeriodSol(summary), summary.price) : undefined}
             sub={
               summary
-                ? `${fmtUsd(summary.sinceFriday.revenueSol, summary.price)} · ${nf0.format(summary.sinceFriday.feeEvents)} fees${summary.lastPayout ? ` · last: ${fmtSol(summary.lastPayout.sol)} SOL to ${summary.lastPayout.recipients} wallets` : ''}`
+                ? `${summary.lastPeriod && summary.lastPeriod.revenueSol > 0 ? `last period: ${fmtSol(summary.lastPeriod.netRevenueSol)} SOL` : ''}`
                 : '—'
             }
             delta={null}
             accent
           />
           <Kpi
-            label="Dev / team take · all-time"
-            big={`${fmtSol(summary?.totals.operatorOutflowsSol)} SOL`}
-            sub={
-              summary
-                ? `${fmtUsd(summary.totals.operatorOutflowsSol, summary.price)} · pool top-ups ${fmtSol(summary.totals.poolOutflowsSol)} SOL`
-                : '—'
-            }
+            label={`Platform Takes · ${range === 'all' ? 'all time' : range.toUpperCase()}`}
+            big={`${fmtSol(summary?.window.operatorOutflowsSol)} SOL`}
+            sub={summary ? fmtUsd(summary.window.operatorOutflowsSol, summary.price) : '—'}
             delta={null}
           />
         </div>
@@ -216,7 +224,7 @@ export function AmpDashboard() {
         </div>
 
         {/* Adoption row — daily active + daily new users + daily fees */}
-        <div className="grid-1px r-grid-3" style={{ marginTop: 1 }}>
+        <div className="grid-1px r-grid-adoption" style={{ marginTop: 1 }}>
           <LifetimeChart
             title="Active wallets / day"
             subtitle=""
@@ -253,7 +261,7 @@ export function AmpDashboard() {
         </div>
 
         {/* Lifetime growth + heatmap in one 3-column row */}
-        <div className="grid-1px r-grid-3" style={{ marginTop: 1 }}>
+        <div className="grid-1px r-grid-lifetime" style={{ marginTop: 1 }}>
           <LifetimeChart
             title="Lifetime unique users"
             subtitle="cumulative · since launch"
@@ -313,13 +321,42 @@ export function AmpDashboard() {
           </div>
         </div>
 
-        <div className="panel" style={{ marginTop: 1, textAlign: 'center', background: 'transparent', border: 'none' }}>
+        <div className="panel" style={{ marginTop: 1, textAlign: 'center', background: 'transparent', border: 'none', overflow: 'visible' }}>
           <span className="label dim">
             made by <a className="link-ext" href="https://t.me/priktop" target="_blank" rel="noreferrer">Nick</a>
             {' · '}
-            <a className="link-ext" href="https://t.me/AmplifiedTradingBot?start=ref_5c3250ca-99ea-4e8d-a135-56bb2f030991" target="_blank" rel="noreferrer">
-              try Amplified
+            <a className="link-ext" href="/TG-Bot" target="_blank" rel="noreferrer">try Amplified</a>
+            {' · '}
+            <a className="link-ext" href="https://amplified.trading/" target="_blank" rel="noreferrer">website</a>
+            {' · '}
+            <a
+              className="link-ext"
+              href="https://dexscreener.com/solana/6kqarqrwmmjivaddtxarmyivfjnehjdrj6bqzeik9ds4"
+              target="_blank"
+              rel="noreferrer"
+            >
+              dexscreener
             </a>
+            {' · $AMPS CA: '}
+            <CopyAddress addr="FmLUAhn4DrSubT7QYbdXBj6bjJ6nLpbqyncnqvTVpump" />
+            {summary?.feeWallet && (
+              <>
+                {' · '}
+                <a
+                  className="link-ext"
+                  href={`https://orbmarkets.io/address/${summary.feeWallet}/history?hideSpam=true`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="Orb Markets"
+                >
+                  fee wallet
+                </a>
+              </>
+            )}
+            {' · '}
+            <a className="link-ext" href="https://x.com/AmplifiedBot" target="_blank" rel="noreferrer">X</a>
+            {' · '}
+            <a className="link-ext" href="https://t.me/amplifiedportal" target="_blank" rel="noreferrer">Telegram</a>
           </span>
         </div>
       </div>
@@ -348,13 +385,41 @@ function MoonIcon() {
 
 // ---------------- Subcomponents ----------------
 
-function Kpi({ label, big, sub, delta, deltaSuffix, accent }: {
-  label: string; big: string; sub: string; delta: number | null; deltaSuffix?: string; accent?: boolean
+function CopyAddress({ addr }: { addr: string }) {
+  const [copied, setCopied] = useState(false)
+  const onClick = () => {
+    navigator.clipboard.writeText(addr).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }).catch(() => {})
+  }
+  return (
+    <button
+      type="button"
+      className="link-ext copy-ca"
+      onClick={onClick}
+      data-copied={copied ? '1' : undefined}
+      title={copied ? 'Copied!' : 'Click to copy'}
+    >
+      {addr}
+    </button>
+  )
+}
+
+function Kpi({ label, big, bigSub, sub, delta, deltaSuffix, accent }: {
+  label: string; big: string; bigSub?: string; sub: string; delta: number | null; deltaSuffix?: string; accent?: boolean
 }) {
   return (
     <div className="panel">
       <div className="label" style={{ marginBottom: 10 }}>{label}</div>
-      <div className={`kpi-value ${accent ? 'accent' : ''}`}>{big}</div>
+      <div className={`kpi-value ${accent ? 'accent' : ''}`}>
+        <span style={{ whiteSpace: 'nowrap' }}>{big}</span>
+        {bigSub && (
+          <span className="muted kpi-big-sub">
+            {bigSub}
+          </span>
+        )}
+      </div>
       <div className="kpi-sub">
         {sub}
         {delta != null && (
@@ -547,14 +612,14 @@ function LifetimeChart({
       </div>
       {latest != null && (
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
-          {latestLabel && <span className="label">{latestLabel}</span>}
           <span className="kpi-value accent" style={{ fontSize: 22 }}>{fmt(Number(latest))}</span>
+          {latestLabel && <span className="label">{latestLabel}</span>}
         </div>
       )}
       <div style={{ height: 140 }}>
         <ResponsiveContainer width="100%" height="100%">
           {bar ? (
-            <BarChart data={data}>
+            <BarChart data={data} margin={{ top: 5, right: 8, bottom: 0, left: -12 }}>
               <CartesianGrid stroke={colors.grid} strokeDasharray="1 3" />
               <XAxis
                 dataKey={xKey as string}
@@ -562,7 +627,7 @@ function LifetimeChart({
                 tick={{ fontSize: 10, fontFamily: 'JetBrains Mono', fill: colors.tick }}
                 tickFormatter={(v: string) => v.slice(5)}
               />
-              <YAxis stroke={colors.axis} tick={{ fontSize: 10, fontFamily: 'JetBrains Mono', fill: colors.tick }} />
+              <YAxis width={36} stroke={colors.axis} tick={{ fontSize: 10, fontFamily: 'JetBrains Mono', fill: colors.tick }} />
               <Tooltip
                 content={<LifetimeTooltip fmt={fmt} colors={colors} />}
                 cursor={{ fill: `${colors.accent}14` }}
@@ -570,7 +635,7 @@ function LifetimeChart({
               <Bar dataKey={yKey as string} fill={colors.accent} isAnimationActive={false} />
             </BarChart>
           ) : (
-            <AreaChart data={data}>
+            <AreaChart data={data} margin={{ top: 5, right: 8, bottom: 0, left: -12 }}>
               <defs>
                 <linearGradient id={`lg-${yKey as string}`} x1="0" x2="0" y1="0" y2="1">
                   <stop offset="0%" stopColor={colors.accent} stopOpacity={0.3} />
@@ -584,7 +649,7 @@ function LifetimeChart({
                 tick={{ fontSize: 10, fontFamily: 'JetBrains Mono', fill: colors.tick }}
                 tickFormatter={(v: string) => v.slice(5)}
               />
-              <YAxis stroke={colors.axis} tick={{ fontSize: 10, fontFamily: 'JetBrains Mono', fill: colors.tick }} />
+              <YAxis width={36} stroke={colors.axis} tick={{ fontSize: 10, fontFamily: 'JetBrains Mono', fill: colors.tick }} />
               <Tooltip content={<LifetimeTooltip fmt={fmt} colors={colors} />} />
               <Area
                 type="monotone"
@@ -636,6 +701,7 @@ function HeatmapGrid({ cells, colors }: { cells: { dow: number; hour: number; n:
                   className="hm-cell"
                   style={{ background: intensity === 0 ? undefined : `${colors.accent}${alphaHex}` }}
                   data-tooltip={`${d} ${String(h).padStart(2, '0')}:00 · ${n} fees`}
+                  data-edge={h >= 20 ? 'right' : h <= 3 ? 'left' : undefined}
                 />
               )
             })}
@@ -771,17 +837,24 @@ function TradeFrequencyCard({ data, colors }: { data: TradeFrequency | null; col
 function RevenueCalculator({
   days, launchTs, price, totalSupply,
 }: { days: LifetimePoint[]; launchTs: number | null; price: number | null; totalSupply: number }) {
-  // Default token amount: 0.1% of supply (a reasonable starter scenario).
-  const [tokens, setTokens] = useState(() => Math.round(totalSupply * 0.001))
-  const [growth, setGrowth] = useState(10)
+  // Default token amount: 1% of supply (a reasonable starter scenario).
+  // Stored as a string so the input can be temporarily empty while the user
+  // edits — on mobile a controlled `value={0}` would re-insert the leading 0
+  // every time they backspace, making it impossible to clear the field.
+  const [tokensStr, setTokensStr] = useState(() => String(Math.round(totalSupply * 0.01)))
+  const tokens = (() => {
+    const n = parseFloat(tokensStr)
+    return Number.isFinite(n) && n > 0 ? n : 0
+  })()
+  const [growth, setGrowth] = useState(25)
 
   useEffect(() => {
     const t = parseFloat(localStorage.getItem('amp_calc_tokens') || '')
     const g = parseFloat(localStorage.getItem('amp_calc_growth') || '')
-    if (Number.isFinite(t) && t > 0) setTokens(t)
+    if (Number.isFinite(t) && t > 0) setTokensStr(String(t))
     if (Number.isFinite(g) && g >= 1) setGrowth(g)
   }, [])
-  useEffect(() => { localStorage.setItem('amp_calc_tokens', String(tokens)) }, [tokens])
+  useEffect(() => { if (tokens > 0) localStorage.setItem('amp_calc_tokens', String(tokens)) }, [tokens])
   useEffect(() => { localStorage.setItem('amp_calc_growth', String(growth)) }, [growth])
 
   // Average weekly revenue since launch.
@@ -816,12 +889,14 @@ function RevenueCalculator({
           <span className="calc-input-row">
             <input
               type="number"
+              inputMode="decimal"
               min={0}
               step="any"
-              value={tokens}
-              onChange={(e) => setTokens(Math.max(0, parseFloat(e.target.value) || 0))}
+              value={tokensStr}
+              onChange={(e) => setTokensStr(e.target.value)}
+              onFocus={(e) => e.currentTarget.select()}
             />
-            <span className="muted" style={{ fontSize: 11 }}>= {sharePct.toFixed(3)}%</span>
+            <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>= {sharePct.toFixed(3)}%</span>
           </span>
         </label>
 
@@ -836,7 +911,7 @@ function RevenueCalculator({
               value={growth}
               onChange={(e) => setGrowth(parseInt(e.target.value, 10))}
             />
-            <span className="mono accent" style={{ minWidth: 38, textAlign: 'right' }}>{growth}×</span>
+            <span className="mono accent" style={{ minWidth: 52, fontSize: 16, textAlign: 'right' }}>{growth}×</span>
           </span>
         </label>
       </div>
