@@ -112,7 +112,10 @@ const txParams = (sig: string) => [
 
 // Batch JSON-RPC was tested earlier but provider rate-limits made single-call
 // with paced spacing strictly more reliable. Slower but doesn't get throttled.
-const PER_SIG_SPACING_MS = 300
+// 20ms = ~50 RPS sustained, well under Speedy Nodes' 60 RPS cap, and since each
+// call awaits before sleeping there's only ever 1 request in-flight (so the
+// 5-request burst cap doesn't apply).
+const PER_SIG_SPACING_MS = 20
 
 export async function getTransactionsBatch(signatures: string[]): Promise<TxBatchResult[]> {
   const out: TxBatchResult[] = []

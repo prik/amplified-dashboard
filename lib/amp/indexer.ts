@@ -17,7 +17,7 @@ import { ampEvents } from './events'
 
 const SIG_PAGE = 1000
 const TAIL_INTERVAL_MS = 60_000
-const BETWEEN_PAGE_MS = 300
+const BETWEEN_PAGE_MS = 50
 
 // Cadence for the verified-balance recompute job. Each tick walks every
 // pinged wallet's AMP token-account history since the period start, so it's
@@ -400,8 +400,6 @@ async function recomputeVerifiedBalancesOnce(): Promise<void> {
         e instanceof Error ? e.message : String(e)
       )
     }
-    // Tiny pause between wallets to keep RPC pressure bounded.
-    await sleep(100)
   }
   console.log(
     `[amp] verif recompute: period=${new Date(periodStart * 1000).toISOString().slice(0, 10)} ` +
