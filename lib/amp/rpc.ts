@@ -162,6 +162,29 @@ export async function getTokenAccountsByOwner(owner: string, mint: string): Prom
   return out
 }
 
+// Sum of an owner's raw token balance across all token accounts for a given
+// mint. Returns 0 if the owner has no token accounts. Used by the close-side
+// indexer side-effect to detect partial vs full closes — non-zero balance
+// after a close-settle means the user still holds part of the position.
+export async function getTokenBalanceRaw(owner: string, mint: string): Promise<bigint> {
+  const accts = await getTokenAccountsByOwner(owner, mint)
+  let total = 0n
+  for (const a of accts) total += BigInt(a.amount)
+  return total
+}
+
+// Same as above but returns decimals as well — useful when we don't know them
+// yet (caller can cache).
+export async function getTokenBalanceWithDecimals(
+  owner: string, mint: string
+): Promise<{ raw: bigint; decimals: number } | null> {
+  const accts = await getTokenAccountsByOwner(owner, mint)
+  if (accts.length === 0) return { raw: 0n, decimals: 0 }
+  let total = 0n
+  for (const a of accts) total += BigInt(a.amount)
+  return { raw: total, decimals: accts[0].decimals }
+}
+
 // Fetch the total supply of an SPL token. Returns the supply as a plain number
 // (decimals already applied — e.g. 1B for a 1B-supply token).
 export async function getTokenSupply(mint: string): Promise<number> {
@@ -174,5 +197,20 @@ export async function getTokenSupply(mint: string): Promise<number> {
   const amount = res?.value?.amount ? Number(res.value.amount) : 0
   const decimals = res?.value?.decimals ?? 0
   return amount / Math.pow(10, decimals)
+}
+
+// Same as getTokenSupply but also returns raw + decimals — needed by mcap
+// math, which works in raw units to avoid float precision loss.
+export async function getTokenSupplyRaw(mint: string): Promise<{ raw: bigint; decimals: number } | null> {
+  try {
+    const res = await rpcCall<{ value: { amount: string; decimals: number } }>(
+      'getTokenSupply',
+      [mint, { commitment: 'confirmed' }]
+    )
+    if (!res?.value) return null
+    return { raw: BigInt(res.value.amount), decimals: res.value.decimals }
+  } catch {
+    return null
+  }
 }
 

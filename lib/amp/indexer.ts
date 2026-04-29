@@ -1,15 +1,21 @@
 import {
   getSignaturesForAddress, getTransactionsBatch,
-  getTokenSupply, getTokenAccountsByOwner, sleep,
+  getTokenSupply, getTokenAccountsByOwner, getTokenBalanceRaw, sleep,
   type ParsedTx,
 } from './rpc'
 import {
   insertTxs, getState, setState, hasSignature, countTxs,
   insertVerifications, hasVerification, countVerifications, allVerifiedWallets,
-  upsertVerifiedBalance, getVerifiedBalances, type TxRow, type VerifRow,
+  upsertVerifiedBalance, getVerifiedBalances,
+  updateTxKind, getInflowSignaturesMissingKind,
+  updateTxTradeMeta, getInflowSignaturesMissingTradeMeta,
+  upsertWalletPair,
+  insertTradeOpen, getActiveTradeForTrading, applyTradeClose,
+  type TxRow, type VerifRow, type FeeKind, type TradeMetaUpdate,
 } from './db'
+import { resolveTokenMeta } from './tokens'
 import {
-  FEE_WALLET, TOKEN_MINT, VERIFICATION_WALLET, VERIFICATION_LAMPORTS,
+  FEE_WALLET, TOKEN_MINT, POOL_WALLET, VERIFICATION_WALLET, VERIFICATION_LAMPORTS,
   LAUNCH_TS_SEC,
 } from './config'
 import { lastFridayUtcSec } from './queries'
@@ -36,6 +42,383 @@ interface Classified {
   direction: 'in' | 'out'
   counterparty: string
   amount_lamports: number
+  kind: FeeKind | null
+}
+
+// Liquidation threshold for closes. ATA-rent reclaim on close is bounded at
+// ~0.005-0.010 SOL regardless of trade size (it reflects physical account
+// closures, not trade economics). For small trades we need an absolute floor
+// to distinguish rent from a real refund; for large trades we need a relative
+// threshold so a 1 SOL collateral trade returning 0.05 SOL isn't classified as
+// REKT despite recovering only 5% of stake.
+//
+// Final rule: REKT iff dep_refund ≤ max(LIQ_FLOOR_LAM, collat × LIQ_FRAC).
+// Floor of 0.015 SOL absorbs observed rent-only refunds; fraction of 10% means
+// any trade returning <10% of original collateral counts as a wipe.
+const LIQ_FLOOR_LAM = 15_000_000
+const LIQ_FRAC = 0.1
+function isLiquidation(depRefundLam: number, collatLam: number): 0 | 1 {
+  const threshold = Math.max(LIQ_FLOOR_LAM, Math.floor(collatLam * LIQ_FRAC))
+  return depRefundLam <= threshold ? 1 : 0
+}
+
+// Common collateral steps used by Amplified's UI. We snap raw on-chain
+// collateral estimates to these to recover the user's *intended* size.
+const COLLAT_STEPS_LAM = [
+  5_000_000,    // 0.005
+  10_000_000,   // 0.01
+  25_000_000,   // 0.025
+  50_000_000,   // 0.05
+  75_000_000,   // 0.075
+  100_000_000,  // 0.1
+  150_000_000,  // 0.15
+  200_000_000,  // 0.2
+  250_000_000,  // 0.25
+  500_000_000,  // 0.5
+  1_000_000_000,// 1.0
+  2_000_000_000,// 2.0
+]
+function snapCollat(rawLam: number): number {
+  let best = COLLAT_STEPS_LAM[0]
+  let bestDiff = Math.abs(rawLam - best)
+  for (const s of COLLAT_STEPS_LAM) {
+    const d = Math.abs(rawLam - s)
+    if (d < bestDiff) { best = s; bestDiff = d }
+  }
+  return best
+}
+
+// Compute market-cap-in-SOL given:
+//   solLam            — SOL paid in (or received from) the swap, in lamports
+//   tokensRaw         — tokens moved in/out of the trading wallet, raw units
+//   totalSupplyRaw    — total supply of the mint, raw units (decimals same as tokensRaw)
+// Decimals cancel: mcap_sol = solLam × supplyRaw / (1e9 × tokensRaw)
+// We use BigInt for the multiplication step to avoid Number overflow on the
+// (10^9 × 10^15) intermediate; final divide returns a Number for storage.
+function computeMcapSol(solLam: number, tokensRaw: number, totalSupplyRaw: number | null): number | null {
+  if (!totalSupplyRaw || tokensRaw <= 0 || solLam <= 0) return null
+  const num = BigInt(solLam) * BigInt(totalSupplyRaw)
+  const denom = BigInt(tokensRaw) * 1_000_000_000n
+  if (denom === 0n) return null
+  // Scale by 1e6 before truncation to preserve micro-SOL precision, then
+  // divide back at the end.
+  const scaled = (num * 1_000_000n) / denom
+  return Number(scaled) / 1_000_000
+}
+
+// Side-effect for a close-settle event. Looks up the matching active trade
+// for the trading wallet, queries the wallet's current token balance to detect
+// whether this is a partial or final close, computes per-event exit mcap, and
+// records both an amp_trade_close row and an amp_trade aggregate update.
+async function applyCloseSideEffect(args: {
+  closeSig: string
+  closeTrading: string
+  blockTime: number
+  depRefundLam: number
+  closeFeeLam: number
+  poolCloseLam: number
+  tradingSettleDelta: number
+}): Promise<void> {
+  const open = getActiveTradeForTrading(args.closeTrading)
+  if (!open) {
+    // No matching open. Best-effort: mark amp_txs as a close, with the absolute
+    // liquidation floor since we don't know the collat. Trade is invisible to
+    // amp_trade — pre-launch / pre-index opener.
+    const isLiq = args.depRefundLam <= LIQ_FLOOR_LAM ? 1 : 0
+    updateTxTradeMeta(args.closeSig, {
+      pool_delta_lam: args.poolCloseLam, is_open: 0, is_liquidation: isLiq,
+      token_mint: null, leverage: null, collat_lam: null,
+    })
+    return
+  }
+
+  // Tokens still held by the trading wallet for this position's mint, RIGHT
+  // NOW. tokens_sold_this_close = previous_remaining - current_balance.
+  // Note: in backfill this reflects current state, not historical state at
+  // close time. For trades that have already fully closed by the time we
+  // backfill, current balance is 0 and we treat the close as final.
+  let currentBalance = 0n
+  try {
+    currentBalance = await getTokenBalanceRaw(open.trading_wallet, open.token_mint)
+  } catch (e) {
+    console.warn('[amp] balance lookup failed for close', args.closeSig.slice(0, 10), e instanceof Error ? e.message : e)
+  }
+  const prevRemaining = BigInt(open.tokens_remaining_raw)
+  let soldThisClose = prevRemaining - currentBalance
+  if (soldThisClose < 0n) soldThisClose = 0n   // shouldn't happen, but clamp
+  if (soldThisClose > prevRemaining) soldThisClose = prevRemaining
+  const isFinal: 0 | 1 = currentBalance === 0n ? 1 : 0
+
+  // Exit mcap for THIS event. Swap proceeds = -trading_settle_delta (trading
+  // wallet sent that SOL out as pool_back + fee + dep_refund + small overhead).
+  // Per-event mcap = (proceeds / tokens_sold) × supply. We need the mint's
+  // total supply (from amp_token_meta). Fetch lazily — supply doesn't change.
+  const meta = await resolveTokenMeta(open.token_mint).catch(() => null)
+  const proceedsLam = Math.max(0, -args.tradingSettleDelta)
+  const exitMcap = soldThisClose > 0n
+    ? computeMcapSol(proceedsLam, Number(soldThisClose), meta?.total_supply_raw ?? null)
+    : null
+
+  // Liquidation only meaningful at FINAL close (a partial profit-take isn't
+  // "REKT" even if a small refund). On final, scale threshold against the
+  // ORIGINAL collateral.
+  const isLiqFinal: 0 | 1 = isFinal
+    ? isLiquidation(open.dep_refund_total_lam + args.depRefundLam, open.collat_lam)
+    : 0
+
+  // Mirror onto amp_txs so the live feed pill renders correctly. Token /
+  // leverage / collat copy from the open; is_liquidation only flips on the
+  // final close.
+  updateTxTradeMeta(args.closeSig, {
+    pool_delta_lam: args.poolCloseLam, is_open: 0,
+    is_liquidation: isFinal ? isLiqFinal : 0,
+    token_mint: open.token_mint, leverage: open.leverage, collat_lam: open.collat_lam,
+  })
+
+  applyTradeClose({
+    open_signature: open.open_signature,
+    pool_open_lam: open.pool_open_lam,
+    is_liquidation_final: isFinal ? isLiqFinal : null,
+    partial: {
+      close_signature: args.closeSig,
+      closed_at: args.blockTime,
+      tokens_sold_raw: Number(soldThisClose),
+      pool_close_lam: args.poolCloseLam,
+      dep_refund_lam: args.depRefundLam,
+      fee_close_lam: args.closeFeeLam,
+      exit_mcap_sol: exitMcap,
+      is_final: isFinal,
+    },
+  })
+}
+
+// Trade meta extracted from a parsed open/close fee tx. See
+// /home/kode/.claude/projects/-home-kode-amplified-dashboard/memory/project_amplified_tx_anatomy.md
+// for the full anatomy and the unified leverage formula.
+//
+// `pool_delta_lam` sign tells us direction:
+//   < 0 → OPEN (pool fronted SOL out)
+//   > 0 → CLOSE (pool reclaimed SOL)
+//   == 0 / null → not a trade event (e.g. dust spam, weekly distribution slice)
+//
+// On opens, we identify the trading wallet (the position holder) and stash an
+// `amp_open_state` entry so the eventual close-settle tx can be enriched with
+// the same token + leverage. On closes, we pop the entry — that resolves the
+// token mint without needing to re-fetch the swap-leg tx.
+interface ExtractedTrade {
+  meta: TradeMetaUpdate
+  // Inputs to side-effects (wallet pair upsert, trade open insert).
+  // Filled only on opens; null on closes / non-trades.
+  open_side: {
+    deposit_wallet: string
+    trading_wallet: string
+    token_mint: string
+    leverage: number
+    collat_lam: number
+    // Raw token amount the trading wallet received in this open (NEW scheme:
+    // present in this tx; OLD scheme: 0 here, the swap leg has it — handled
+    // by a follow-up balance check).
+    tokens_received_raw: number
+  } | null
+  // Filled only on closes.
+  close_side: {
+    trading_wallet: string
+    deposit_refund_lam: number
+    // Trading wallet's net SOL delta in the close-settle tx. Negative means
+    // the trading wallet sent out SOL (sum of pool_back + fee + dep_refund +
+    // small overhead). |value| ≈ swap proceeds for *this* close event,
+    // letting us compute exit mcap = (proceeds / tokens_sold) × supply.
+    trading_settle_delta_lam: number
+  } | null
+}
+
+function extractTradeMeta(tx: ParsedTx, classified: Classified): ExtractedTrade {
+  const empty: ExtractedTrade = {
+    meta: { pool_delta_lam: null, is_open: null, is_liquidation: null,
+            token_mint: null, leverage: null, collat_lam: null },
+    open_side: null, close_side: null,
+  }
+  if (classified.direction === 'out') return empty
+  if (!POOL_WALLET) return empty
+  if (!tx.meta) return empty
+
+  const keys = tx.transaction?.message?.accountKeys
+  if (!keys) return empty
+  const keyPubkey = (k: (typeof keys)[number]) => (typeof k === 'string' ? k : k.pubkey)
+  const keyIsSigner = (k: (typeof keys)[number]) => (typeof k === 'string' ? false : k.signer)
+
+  const poolIdx = keys.findIndex((k) => keyPubkey(k) === POOL_WALLET)
+  if (poolIdx < 0) return empty  // pool not in tx → not a trade event
+
+  const pre = tx.meta.preBalances, post = tx.meta.postBalances
+  if (!pre || !post || pre.length !== post.length) return empty
+  const poolDelta = post[poolIdx] - pre[poolIdx]
+  if (poolDelta === 0) return empty
+
+  // Direction follows pool delta sign.
+  if (poolDelta < 0) {
+    // ---- OPEN ----
+    const deposit = classified.counterparty   // the fee payer = deposit wallet
+    // Trading wallet identification:
+    //   NEW scheme: trading is the 2nd non-fee-wallet, non-pool signer
+    //   OLD scheme: trading isn't a signer; it's the account that receives
+    //     the largest non-pool/fee/deposit positive SOL delta (the position SOL)
+    let trading: string | null = null
+    // Try NEW first: look for another signer
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i]
+      if (!keyIsSigner(k)) continue
+      const pk = keyPubkey(k)
+      if (pk === FEE_WALLET || pk === POOL_WALLET || pk === deposit) continue
+      trading = pk
+      break
+    }
+    if (!trading) {
+      // OLD scheme: largest positive SOL delta among non-pool/fee/deposit accts
+      let bestIdx = -1, bestDelta = 0
+      for (let i = 0; i < keys.length; i++) {
+        const pk = keyPubkey(keys[i])
+        if (pk === FEE_WALLET || pk === POOL_WALLET || pk === deposit) continue
+        const d = post[i] - pre[i]
+        if (d > bestDelta) { bestDelta = d; bestIdx = i }
+      }
+      if (bestIdx >= 0) trading = keyPubkey(keys[bestIdx])
+    }
+    if (!trading) return { ...empty, meta: { ...empty.meta, pool_delta_lam: poolDelta, is_open: 1 } }
+
+    // Token mint + amount: the trading wallet's positive token-balance delta
+    // in this tx (NEW scheme only; OLD scheme has no token movement here — the
+    // swap leg lives in a separate tx, and tokens_received_raw stays 0 here).
+    let token_mint: string | null = null
+    let tokens_received_raw_big = 0n
+    const preTb = tx.meta.preTokenBalances ?? []
+    const postTb = tx.meta.postTokenBalances ?? []
+    const tradingTokens = new Map<string, { pre: bigint; post: bigint }>()
+    for (const b of preTb) {
+      if (b.owner !== trading) continue
+      if (b.mint === 'So11111111111111111111111111111111111111112') continue
+      const cur = tradingTokens.get(b.mint) ?? { pre: 0n, post: 0n }
+      cur.pre += BigInt(b.uiTokenAmount.amount)
+      tradingTokens.set(b.mint, cur)
+    }
+    for (const b of postTb) {
+      if (b.owner !== trading) continue
+      if (b.mint === 'So11111111111111111111111111111111111111112') continue
+      const cur = tradingTokens.get(b.mint) ?? { pre: 0n, post: 0n }
+      cur.post += BigInt(b.uiTokenAmount.amount)
+      tradingTokens.set(b.mint, cur)
+    }
+    for (const [mint, v] of tradingTokens) {
+      const d = v.post - v.pre
+      if (d > 0n) { token_mint = mint; tokens_received_raw_big = d; break }
+    }
+
+    // Leverage formula (unified across schemes):
+    //   collat ≈ -dep_delta - fee_delta - trading_topup (NEW) or - rent_overhead (OLD)
+    //   leverage = round(pool_outflow / collat) + 1
+    const depIdx = keys.findIndex((k) => keyPubkey(k) === deposit)
+    const feeIdx = keys.findIndex((k) => keyPubkey(k) === FEE_WALLET)
+    const tradingIdx = keys.findIndex((k) => keyPubkey(k) === trading)
+    const depDelta = depIdx >= 0 ? post[depIdx] - pre[depIdx] : 0
+    const feeDelta = feeIdx >= 0 ? post[feeIdx] - pre[feeIdx] : 0
+    const tradDelta = tradingIdx >= 0 ? post[tradingIdx] - pre[tradingIdx] : 0
+    // NEW scheme: trading_topup is small (positive). OLD: trading received the
+    // full position; subtract a rent overhead estimate instead.
+    const isNew = !!token_mint
+    const overhead = isNew ? Math.max(0, tradDelta) : 11_000_000  // 0.011 SOL rent estimate
+    const rawCollatLam = -depDelta - feeDelta - overhead
+    if (rawCollatLam < 1_000_000) {
+      // Doesn't look right; bail out with just direction info.
+      return { ...empty, meta: { ...empty.meta, pool_delta_lam: poolDelta, is_open: 1 } }
+    }
+    const collatLam = snapCollat(rawCollatLam)
+    const lev = Math.max(2, Math.min(10, Math.round(-poolDelta / collatLam) + 1))
+
+    return {
+      meta: {
+        pool_delta_lam: poolDelta, is_open: 1, is_liquidation: null,
+        token_mint, leverage: lev, collat_lam: collatLam,
+      },
+      open_side: token_mint ? {
+        deposit_wallet: deposit, trading_wallet: trading,
+        token_mint, leverage: lev, collat_lam: collatLam,
+        // tokens_received_raw fits in Number for pump.fun-shape tokens; bigint
+        // → number conversion is safe up to 2^53. For larger mints precision
+        // may slip; mcap math tolerates it.
+        tokens_received_raw: Number(tokens_received_raw_big),
+      } : null,
+      close_side: null,
+    }
+  } else {
+    // ---- CLOSE ----
+    // counterparty is the trading wallet (sole signer on close-settle txs).
+    const trading = classified.counterparty
+    // deposit refund: the deposit wallet's SOL inflow in this same tx. We
+    // pick the largest non-pool / non-fee / non-trading positive delta as a
+    // best-guess deposit address.
+    let depRefundLam = 0
+    for (let i = 0; i < keys.length; i++) {
+      const pk = keyPubkey(keys[i])
+      if (pk === POOL_WALLET || pk === FEE_WALLET || pk === trading) continue
+      const d = post[i] - pre[i]
+      if (d > depRefundLam) depRefundLam = d
+    }
+    // Trading wallet's net SOL delta (negative — it's distributing swap
+    // proceeds out). Used to derive swap proceeds for exit-mcap math.
+    const tradingIdx = keys.findIndex((k) => keyPubkey(k) === trading)
+    const tradingDelta = tradingIdx >= 0 ? post[tradingIdx] - pre[tradingIdx] : 0
+
+    // Don't pre-classify is_liquidation here — the threshold scales with the
+    // matched open's collateral, which we only know after the side-effect's
+    // getActiveTradeForTrading lookup. NULL means "deferred"; the side-effect
+    // overwrites with the right value, or falls back to the absolute floor if
+    // there's no matching open (legacy / pre-launch opener).
+    return {
+      meta: {
+        pool_delta_lam: poolDelta, is_open: 0, is_liquidation: null,
+        token_mint: null, leverage: null, collat_lam: null,
+      },
+      open_side: null,
+      close_side: {
+        trading_wallet: trading,
+        deposit_refund_lam: depRefundLam,
+        trading_settle_delta_lam: tradingDelta,
+      },
+    }
+  }
+}
+
+// Bucket the counterparty's net SPL-token movement in this tx into entry/exit.
+// 'entry' = user gained tokens (opened a position / bought via Amplified)
+// 'exit'  = user lost tokens   (closed a position / sold)
+// 'other' = no token movement, or both gains and losses (route swaps, etc.)
+function classifyKind(tx: ParsedTx, counterparty: string): FeeKind {
+  const pre = tx.meta?.preTokenBalances ?? []
+  const post = tx.meta?.postTokenBalances ?? []
+  const byMint = new Map<string, { pre: bigint; post: bigint }>()
+  const get = (mint: string) => {
+    let cur = byMint.get(mint)
+    if (!cur) { cur = { pre: 0n, post: 0n }; byMint.set(mint, cur) }
+    return cur
+  }
+  for (const b of pre) {
+    if (b.owner !== counterparty) continue
+    get(b.mint).pre += BigInt(b.uiTokenAmount.amount)
+  }
+  for (const b of post) {
+    if (b.owner !== counterparty) continue
+    get(b.mint).post += BigInt(b.uiTokenAmount.amount)
+  }
+  let hasGain = false
+  let hasLoss = false
+  for (const v of byMint.values()) {
+    const d = v.post - v.pre
+    if (d > 0n) hasGain = true
+    else if (d < 0n) hasLoss = true
+  }
+  if (hasGain && !hasLoss) return 'entry'
+  if (hasLoss && !hasGain) return 'exit'
+  return 'other'
 }
 
 // Classify a parsed Solana tx by comparing pre/post balances at the fee-wallet
@@ -64,7 +447,12 @@ function classifyParsedTx(tx: ParsedTx | null): Classified | null {
     if (payerIdx < 0) return null
     const payer = keyPubkey(keys[payerIdx])
     if (!payer || payer === FEE_WALLET) return null
-    return { direction: 'in', counterparty: payer, amount_lamports: ourDelta }
+    return {
+      direction: 'in',
+      counterparty: payer,
+      amount_lamports: ourDelta,
+      kind: classifyKind(tx, payer),
+    }
   }
 
   // Outflow: fee wallet is the signer. Recipient = largest positive delta.
@@ -77,7 +465,7 @@ function classifyParsedTx(tx: ParsedTx | null): Classified | null {
   if (cpIdx < 0) return null
   const counterparty = keyPubkey(keys[cpIdx])
   if (!counterparty || counterparty === FEE_WALLET) return null
-  return { direction: 'out', counterparty, amount_lamports: Math.abs(ourDelta) }
+  return { direction: 'out', counterparty, amount_lamports: Math.abs(ourDelta), kind: null }
 }
 
 interface PageResult { processed: number; stored: number }
@@ -85,10 +473,17 @@ interface PageResult { processed: number; stored: number }
 async function processSignaturesViaRpc(
   sigMetas: { signature: string; slot: number; blockTime: number | null }[]
 ): Promise<PageResult> {
-  const fresh = sigMetas.filter((s) => !hasSignature(s.signature))
+  // Sort ascending by blockTime so opens are processed before their closes
+  // when both fall in the same fetch window — without this the close-side
+  // side-effect can run before the open-side has written amp_trade, breaking
+  // the partial-close pairing.
+  const fresh = sigMetas
+    .filter((s) => !hasSignature(s.signature))
+    .sort((a, b) => (a.blockTime ?? 0) - (b.blockTime ?? 0))
   if (fresh.length === 0) return { processed: 0, stored: 0 }
 
   const rows: TxRow[] = []
+  const sideEffects: Array<() => Promise<void>> = []
   const results = await getTransactionsBatch(fresh.map((s) => s.signature))
   for (let j = 0; j < results.length; j++) {
     const { signature, tx, error } = results[j]
@@ -98,16 +493,83 @@ async function processSignaturesViaRpc(
     }
     const c = classifyParsedTx(tx)
     if (!c) continue
+    const trade = tx ? extractTradeMeta(tx, c) : null
+    const blockTime = tx!.blockTime ?? fresh[j].blockTime ?? 0
     rows.push({
       signature,
       slot: tx!.slot,
-      block_time: tx!.blockTime ?? fresh[j].blockTime ?? 0,
+      block_time: blockTime,
       direction: c.direction,
       counterparty: c.counterparty,
       amount_lamports: c.amount_lamports,
+      kind: c.kind,
+      pool_delta_lam: trade?.meta.pool_delta_lam ?? null,
+      is_open: trade?.meta.is_open ?? null,
+      is_liquidation: trade?.meta.is_liquidation ?? null,
+      token_mint: trade?.meta.token_mint ?? null,
+      leverage: trade?.meta.leverage ?? null,
+      collat_lam: trade?.meta.collat_lam ?? null,
     })
+    if (trade?.open_side) {
+      const o = trade.open_side
+      const openFeeLam = c.amount_lamports
+      const txKeys = tx?.transaction?.message?.accountKeys ?? []
+      const depIdx = txKeys.findIndex((k) => (typeof k === 'string' ? k : k.pubkey) === o.deposit_wallet)
+      const depDelta = depIdx >= 0 && tx?.meta
+        ? tx.meta.postBalances[depIdx] - tx.meta.preBalances[depIdx]
+        : 0
+      const depOpenLam = -depDelta
+      const poolOpenLam = trade.meta.pool_delta_lam != null ? -trade.meta.pool_delta_lam : 0
+      const positionLam = o.leverage * o.collat_lam
+
+      sideEffects.push(async () => {
+        upsertWalletPair({
+          trading_wallet: o.trading_wallet,
+          deposit_wallet: o.deposit_wallet,
+          first_seen: blockTime,
+        })
+        // Resolve token meta (symbol + decimals + supply) — used for entry
+        // mcap. Falls through to null mcap if supply not yet known; future
+        // call will fill via the COALESCE upsert.
+        const meta = await resolveTokenMeta(o.token_mint).catch(() => null)
+        const entryMcap = computeMcapSol(positionLam, o.tokens_received_raw, meta?.total_supply_raw ?? null)
+
+        insertTradeOpen({
+          open_signature: signature,
+          deposit_wallet: o.deposit_wallet,
+          trading_wallet: o.trading_wallet,
+          token_mint: o.token_mint,
+          leverage: o.leverage,
+          collat_lam: o.collat_lam,
+          position_lam: positionLam,
+          opened_at: blockTime,
+          pool_open_lam: poolOpenLam,
+          dep_open_lam: depOpenLam,
+          fee_open_lam: openFeeLam,
+          tokens_received_raw: o.tokens_received_raw,
+          entry_mcap_sol: entryMcap,
+        })
+      })
+    }
+    if (trade?.close_side) {
+      const closeSig = signature
+      const closeTrading = trade.close_side.trading_wallet
+      const depRefundLam = trade.close_side.deposit_refund_lam
+      const closeFeeLam = c.amount_lamports
+      const poolCloseLam = trade.meta.pool_delta_lam ?? 0
+      const tradingSettleDelta = trade.close_side.trading_settle_delta_lam
+      sideEffects.push(() => applyCloseSideEffect({
+        closeSig, closeTrading, blockTime,
+        depRefundLam, closeFeeLam, poolCloseLam, tradingSettleDelta,
+      }))
+    }
   }
   if (rows.length > 0) insertTxs(rows)
+  for (const fn of sideEffects) {
+    try { await fn() } catch (e) {
+      console.warn('[amp] trade side-effect failed:', e instanceof Error ? e.message : e)
+    }
+  }
   return { processed: fresh.length, stored: rows.length }
 }
 
@@ -144,6 +606,128 @@ async function backfill(): Promise<void> {
   console.log(`[amp] backfill complete: pages=${pages} total=${countTxs()}`)
 }
 
+// ---- Kind backfill ----
+// `kind` (entry/exit/other) was added later, so legacy inflow rows have it as
+// NULL. The feed surfaces the latest 50 inflows with a pill, so this one-shot
+// pass at startup re-fetches the most recent inflows that are missing kind and
+// patches them in. Older rows naturally fill in over subsequent restarts as
+// the unfilled-window slides forward.
+const KIND_BACKFILL_LIMIT = 200
+
+async function backfillKindsOnce(): Promise<void> {
+  const sigs = getInflowSignaturesMissingKind(KIND_BACKFILL_LIMIT)
+  if (sigs.length === 0) return
+  console.log(`[amp] kind backfill: classifying ${sigs.length} inflows`)
+  const results = await getTransactionsBatch(sigs)
+  let patched = 0
+  for (const { signature, tx } of results) {
+    if (!tx) continue
+    const c = classifyParsedTx(tx)
+    if (!c || c.direction !== 'in' || !c.kind) continue
+    updateTxKind(signature, c.kind)
+    patched++
+  }
+  console.log(`[amp] kind backfill: patched ${patched}/${sigs.length} inflows`)
+}
+
+// ---- Trade-meta backfill ----
+// Same idea as kind backfill — fills pool_delta_lam / is_open / is_liquidation
+// / token_mint / leverage / collat_lam on legacy inflow rows. Feed pill,
+// deduped user counts, and any leverage/token UI all depend on these fields.
+//
+// Runs in chunks of TRADE_META_BACKFILL_CHUNK newest-first, looping until no
+// NULL rows remain. Async + non-blocking; doesn't gate the server boot. Each
+// chunk has a small inter-chunk pause so we don't monopolise the RPC budget.
+const TRADE_META_BACKFILL_CHUNK = 500
+const TRADE_META_BACKFILL_PAUSE_MS = 500
+
+async function backfillTradeMetaOnce(): Promise<void> {
+  let pass = 0
+  for (;;) {
+    const did = await backfillTradeMetaChunk(TRADE_META_BACKFILL_CHUNK)
+    if (did === 0) break
+    pass++
+    await sleep(TRADE_META_BACKFILL_PAUSE_MS)
+  }
+  if (pass > 0) console.log(`[amp] trade-meta backfill: complete (${pass} chunks)`)
+}
+
+async function backfillTradeMetaChunk(limit: number): Promise<number> {
+  const sigs = getInflowSignaturesMissingTradeMeta(limit)
+  if (sigs.length === 0) return 0
+  console.log(`[amp] trade-meta backfill: re-fetching ${sigs.length} inflows`)
+  // Walk OLDEST first so the open→close ordering used by amp_trade matches.
+  const oldestFirst = [...sigs].reverse()
+  const results = await getTransactionsBatch(oldestFirst)
+  let patched = 0
+  for (let i = 0; i < results.length; i++) {
+    const { signature, tx } = results[i]
+    if (!tx) continue
+    const c = classifyParsedTx(tx)
+    if (!c) continue
+    const trade = extractTradeMeta(tx, c)
+    if (trade.meta.pool_delta_lam == null) continue
+    updateTxTradeMeta(signature, trade.meta)
+    patched++
+    const blockTime = tx.blockTime ?? 0
+    if (trade.open_side) {
+      const o = trade.open_side
+      const openFeeLam = c.amount_lamports
+      const txKeys = tx.transaction?.message?.accountKeys ?? []
+      const depIdx = txKeys.findIndex((k) => (typeof k === 'string' ? k : k.pubkey) === o.deposit_wallet)
+      const depDelta = depIdx >= 0 && tx.meta
+        ? tx.meta.postBalances[depIdx] - tx.meta.preBalances[depIdx]
+        : 0
+      const depOpenLam = -depDelta
+      const poolOpenLam = -(trade.meta.pool_delta_lam ?? 0)
+      const positionLam = o.leverage * o.collat_lam
+      try {
+        upsertWalletPair({
+          trading_wallet: o.trading_wallet,
+          deposit_wallet: o.deposit_wallet,
+          first_seen: blockTime,
+        })
+        const meta = await resolveTokenMeta(o.token_mint).catch(() => null)
+        const entryMcap = computeMcapSol(positionLam, o.tokens_received_raw, meta?.total_supply_raw ?? null)
+        insertTradeOpen({
+          open_signature: signature,
+          deposit_wallet: o.deposit_wallet,
+          trading_wallet: o.trading_wallet,
+          token_mint: o.token_mint,
+          leverage: o.leverage,
+          collat_lam: o.collat_lam,
+          position_lam: positionLam,
+          opened_at: blockTime,
+          pool_open_lam: poolOpenLam,
+          dep_open_lam: depOpenLam,
+          fee_open_lam: openFeeLam,
+          tokens_received_raw: o.tokens_received_raw,
+          entry_mcap_sol: entryMcap,
+        })
+      } catch (e) {
+        console.warn('[amp] backfill open side-effect failed:', e instanceof Error ? e.message : e)
+      }
+    }
+    if (trade.close_side) {
+      try {
+        await applyCloseSideEffect({
+          closeSig: signature,
+          closeTrading: trade.close_side.trading_wallet,
+          blockTime,
+          depRefundLam: trade.close_side.deposit_refund_lam,
+          closeFeeLam: c.amount_lamports,
+          poolCloseLam: trade.meta.pool_delta_lam ?? 0,
+          tradingSettleDelta: trade.close_side.trading_settle_delta_lam,
+        })
+      } catch (e) {
+        console.warn('[amp] backfill close side-effect failed:', e instanceof Error ? e.message : e)
+      }
+    }
+  }
+  console.log(`[amp] trade-meta backfill: patched ${patched}/${sigs.length} inflows`)
+  return sigs.length
+}
+
 // ---- Tail ----
 
 async function tailOnce(): Promise<void> {
@@ -175,6 +759,8 @@ export function startIndexer(): void {
     )
     fetchSupplyOnce().catch((e) => console.error('[amp] supply fetch crashed:', e))
     backfill().catch((e) => console.error('[amp] backfill crashed:', e))
+    backfillKindsOnce().catch((e) => console.error('[amp] kind backfill crashed:', e))
+    backfillTradeMetaOnce().catch((e) => console.error('[amp] trade-meta backfill crashed:', e))
     if (VERIFICATION_WALLET) {
       console.log(
         `[amp] verification indexer enabled. wallet=${VERIFICATION_WALLET} existing=${countVerifications()}`
